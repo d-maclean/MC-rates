@@ -7,7 +7,7 @@ from glob import glob
 from astropy import units as u, constants as const
 from astropy.cosmology import Cosmology, Planck18, z_at_value
 from scipy.stats import norm
-from multiprocessing import get_context, Pool
+from multiprocessing import get_context
 from functools import partial
 
 from numpy.typing import NDArray
@@ -30,11 +30,11 @@ class BinariesBin:
         self.met = self.initC.metallicity.values[0]
         
         # metadata
-        self.Mdco = (np.sum(self.initC.mass_1.values) +\
+        self.Msim = (np.sum(self.initC.mass_1.values) +\
             np.sum(self.initC.mass_2.values)) * u.Msun
-        self.Msim = (np.sum(self.init_info.mass_singles.values) +\
+        self.Mtot = (np.sum(self.init_info.mass_singles.values) +\
             np.sum(self.init_info.mass_binaries.values)) * u.Msun
-        self.fcorr = self.Mdco/self.Msim
+        self.fcorr = self.Msim/self.Mtot
         
         return
     
@@ -181,14 +181,14 @@ class MCSampler:
         # write output
         data = {
             "bin_num": mergers["bin_num"].values,
-            "mass_1": mergers["mass_1"].values,
-            "mass_2": mergers["mass_2"].values,
-            "kstar_1": mergers["kstar_1"].values,
-            "kstar_2": mergers["kstar_2"].values,
+            #"mass_1": mergers["mass_1"].values,
+            #"mass_2": mergers["mass_2"].values,
+            #"kstar_1": mergers["kstar_1"].values,
+            #"kstar_2": mergers["kstar_2"].values,
             "metallicity": initC["metallicity"].values,
-            "mass_1_init": initC["mass_1"].values,
-            "mass_2_init": initC["mass_2"].values,
-            "t_gw": mergers["t_gw"].values,
+            #"mass_1_init": initC["mass_1"].values,
+            #"mass_2_init": initC["mass_2"].values,
+            #"t_gw": mergers["t_gw"].values,
             "t_delay": mergers["t_delay"].values,
         }
         
@@ -226,7 +226,8 @@ class MCSampler:
         return sample_dfs
         
     def _calc_event_weights(self,
-                            sample: pd.DataFrame, time_bins: NDArray, det_fn: function) -> pd.DataFrame:
+                            sample: pd.DataFrame, time_bins: NDArray,
+                            det_fn: function, num_draws: int) -> pd.DataFrame:
         '''
         Calculate event weights per Gpc3 per yr based on the Bavera+20 monte carlo sum method.
         ### Parameters:
@@ -240,7 +241,7 @@ class MCSampler:
         # fractional SFR
         binfrac: float = 0.7
         fcorr: float = _bin.fcorr
-        Msim: Quantity = _bin.Msim
+        Mtot: Quantity = _bin.Mtot
         
         n: int = sample.shape[0]
         m: int = len(time_bins) - 1
@@ -259,20 +260,23 @@ class MCSampler:
             t_center = (t0 +tf)/2
             z_center = self.get_z_at_t(t_center)
             SFR_at_center = np.interp(t_center, self.t, self.SFR)
-            frac_SFR_at_center = np.interp(t_center, xp=self.t, fp=self.fSFR_at_metallicity[j_Z,:])
+            met_frac_at_center = np.interp(t_center, xp=self.t, fp=self.fSFR_at_metallicity[j_Z,:])
+            fSFR_Z = met_frac_at_center * SFR_at_center.to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
             
             # get systems that merge in the bin
             filter = (sample.t_merge >= t0) & (sample.t_merge < tf)
             systems = sample[filter]
             f_index = systems.index.values
             
-            fSFR = frac_SFR_at_center * SFR_at_center.to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
-            
             # comoving distance to each (individual) sample
             D_z = np.interp(systems.z_merge, self.z.value, self.comoving_distance)
             P_det = det_fn(systems)
             
-            w = (fSFR/Msim) * binfrac * fcorr *\
+            # we divide the weight by the number of random draws we did for the system;
+            # this is to avoid duplicating the contribution (we only simulated it once)
+            draw_corr = num_draws ** -1
+                        
+            w =  num_draws * (fSFR_Z/Mtot) * binfrac * fcorr *\
                 (4 * np.pi * const.c) * np.float_power(D_z, 2) * P_det * dt
                 
             results.loc[f_index] = w.to(u.yr ** -1)
@@ -282,7 +286,7 @@ class MCSampler:
     
     def calc_rates(self,
                    samples: list[pd.DataFrame], 
-                   zmin: float, zmax: float, nproc = 1, **kwargs) -> pd.DataFrame:
+                   zmin: float, zmax: float, num_draws: int = 100, nproc = 1, **kwargs) -> pd.DataFrame:
     
         if zmin < self.z.min():
             zmin = self.z.min()
@@ -301,7 +305,8 @@ class MCSampler:
         
         ctx = get_context("spawn")
         with ctx.Pool(nproc) as pool:
-            args = partial(self._calc_event_weights, time_bins=time_bin_edges, det_fn=det_fn)
+            args = partial(self._calc_event_weights,\
+                time_bins=time_bin_edges, det_fn=det_fn, num_draws=num_draws)
             weights = pool.map(args, samples)
             
         z_filter = (z_at_cntr >= zmin) & (z_at_cntr < zmax)
@@ -314,3 +319,27 @@ class MCSampler:
             rates += _w_in_range.values.sum() 
 
         return rates * (u.yr ** -1)
+
+    def run(self, **kwargs) -> pd.DataFrame:
+        '''
+        Run a rates calculation from start to finish, using the monte-carlo sum method
+        explained in Bavera+20: https://doi.org/10.1051/0004-6361/201936204
+        ### Arguments:
+        - num_draws: int = the number of random samples to draw for each binary system.
+            DEFAULT = 100
+        - seed: int = the seed to use for pseudorandom number generation while drawing
+            samples. DEFAULT = 4242564
+        - zlims: tuple = the redshift range in which to calculate rates, formatted as
+            (zmin, zmax). DEFAULT = (0, 0.1)
+        - nproc: int = the number of CPU cores to use. DEFAULT = 1
+        ### Returns:
+        - rates: pd.DataFrame = a DataFrame of merger rates
+        '''
+        num_draws: int = kwargs.get("num_draws", 100)
+        seed: int = kwargs.get("seed", 4242564)
+        zlims: tuple[float,float] = kwargs.get("zlims", (0.0, 0.1))
+        nproc: int = kwargs.get("nproc", 1)
+        
+        rand_sample: list[pd.DataFrame] = self.draw_mc_sample(num_draws, nproc=nproc, seed=seed)
+        rates = self.calc_rates(rand_sample, zlims[0], zlims[1], nproc=nproc)
+        
