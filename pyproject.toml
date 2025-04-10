@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=75.8", "numpy>=2.0", "pandas>=2.0", "astropy>=6.1.7", "scipy>=1.15.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "MC-rates_d-maclean"
+version = "0.1"
+authors = [
+  { name="Duncan Maclean", email="dmaclean@unc.edu" },
+]
+description = "A package for calculating cosmological compact object merger rates using a monte-carlo method."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "BSD 2-Clause"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/d-maclean/MC-rates"
+Issues = "https://github.cowm/d-maclean/MC-rates/issues"
