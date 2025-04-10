@@ -17,6 +17,11 @@ from rates_functions import calc_SFR_madau_fragos, calc_mean_metallicity_madau_f
 
 
 class BinariesBin:
+    '''
+    Container for a metallicity bin and its associated models.
+    Each bin should have a table of initial conditions, statistical
+    info, and a corresponding table of DCO mergers.
+    '''
     def __init__(self, src: str):
 
         if not os.path.isfile(src):
@@ -30,11 +35,14 @@ class BinariesBin:
         self.met = self.initC.metallicity.values[0]
         
         # metadata
-        self.Msim = (np.sum(self.initC.mass_1.values) +\
-            np.sum(self.initC.mass_2.values)) * u.Msun
-        self.Mtot = (np.sum(self.init_info.mass_singles.values) +\
-            np.sum(self.init_info.mass_binaries.values)) * u.Msun
-        self.fcorr = self.Msim/self.Mtot
+        #self.Msim = (np.sum(self.initC.mass_1.values) +\
+        #    np.sum(self.initC.mass_2.values)) * u.Msun
+        self.Msim = self.init_info.Msim.values[0] * u.Msun
+        #self.Mtot = (np.sum(self.init_info.mass_singles.values) +\
+        #    np.sum(self.init_info.mass_binaries.values)) * u.Msun
+        self.Msystems = self.init_info.Msystems.values[0] * u.Msun
+        #self.fcorr = self.Msim/self.Mtot
+        self.fcorr = self.Msystems/self.Msim
         
         return
     
@@ -49,7 +57,10 @@ class BinariesBin:
     
 
 class MCSampler:
-    
+    '''
+    Object class for loading data and calculating merger rates for
+    a set of stellar models and cosmological parameters.
+    '''
     default_seed = 0
     
     def __init__(self,
