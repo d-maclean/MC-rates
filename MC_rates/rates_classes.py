@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 from glob import glob
 from astropy import units as u, constants as const
-from astropy.cosmology import Cosmology, Planck18, z_at_value
+from astropy.cosmology import Cosmology, \
+    Planck18, z_at_value, CosmologyError
 from scipy.stats import norm
 from multiprocessing import get_context
 from functools import partial
@@ -61,16 +62,19 @@ class MCSampler:
     Object class for loading data and calculating merger rates for
     a set of stellar models and cosmological parameters.
     '''
-    default_seed = 0
+    default_seed: int = 0
+    abs_zmin: float = 1e-8
+    zmax: float = 2e1
     
     def __init__(self,
                 tmin: Quantity, tmax: Quantity, bins: list[BinariesBin] | str, **kwargs):
         
-        # parse kwargs
+        self.num_pts: int = kwargs.get("num_pts", 1000)
+        # set time vals
+        self.cosmo: Cosmology = kwargs.get("cosmology", Planck18)
         tmin = tmin.to(u.Myr)
         tmax = tmax.to(u.Myr)
-        self.cosmo: Cosmology = kwargs.get("cosmology", Planck18)
-        self.num_pts: int = kwargs.get("num_pts", 1000)
+        
         self.sfr_function: function = kwargs.get("sfr_function", calc_SFR_madau_fragos)
         self.Z_function: function = kwargs.get("Z_function", calc_mean_metallicity_madau_fragos)
         self.Z_dist_option = "lognorm"
@@ -166,8 +170,9 @@ class MCSampler:
         return np.ones(sample.shape[0], dtype=float)
     
     def _sample_worker(self,
-                       _bin: BinariesBin, num_draws: int, seed: int) -> pd.DataFrame:
+                       _bin: BinariesBin, num_draws: int, seed: int, **kwargs) -> pd.DataFrame:
         
+        drop_merge_after_tH: bool = kwargs.get("drop_merge_after_tH", True)
         initC = _bin.initC
         mergers = _bin.merger_data
         n: int = mergers.shape[0]
@@ -190,32 +195,31 @@ class MCSampler:
             sample_list = np.concat([sample_list, valid_time])
             
         # write output
-        data = {
+        data_dict = {
             "bin_num": mergers["bin_num"].values,
-            #"mass_1": mergers["mass_1"].values,
-            #"mass_2": mergers["mass_2"].values,
-            #"kstar_1": mergers["kstar_1"].values,
-            #"kstar_2": mergers["kstar_2"].values,
+            "mass_1": mergers["mass_1"].values,
+            "mass_2": mergers["mass_2"].values,
+            "kstar_1": mergers["kstar_1"].values,
+            "kstar_2": mergers["kstar_2"].values,
             "metallicity": initC["metallicity"].values,
-            #"mass_1_init": initC["mass_1"].values,
-            #"mass_2_init": initC["mass_2"].values,
+            "mass_1_init": initC["mass_1"].values,
+            "mass_2_init": initC["mass_2"].values,
             #"t_gw": mergers["t_gw"].values,
             "t_delay": mergers["t_delay"].values,
         }
+        data: pd.DataFrame = pd.DataFrame(data_dict)
+        data = data.loc[data.index.repeat(n_valid_samples)].reset_index(drop=True)
         
-        for k, v in data.items():
-            data[k] = np.repeat(v, n_valid_samples)
-        data["t_form"] = sample_list
-        t_form_quant = sample_list * u.Myr
-        data["z_form"] = self.get_z_at_t(t_form_quant)
-        t_event_quant = t_form_quant + (data["t_delay"] * u.Myr)
-        data["t_merge"] = t_event_quant.value
-        data["z_merge"] = self.get_z_at_t(t_event_quant)
+        sample_quant = sample_list * u.Myr
+        t_merge_arr = sample_list + data["t_delay"].values
+        t_merge_quant = t_merge_arr * u.Myr
         
-        output_df = pd.DataFrame(data)
-        output_df.reset_index(inplace=True)
+        data = data.assign(t_form=sample_list)
+        data = data.assign(z_form=self.get_z_at_t(sample_quant).value)
+        data = data.assign(t_merge=t_merge_arr)
+        data = data.assign(z_merge=self.get_z_at_t(t_merge_quant).value)
         
-        return output_df
+        return data
 
     def draw_mc_sample(self, num_draws: int = 100, nproc: int = 1, seed: int = None) -> list[pd.DataFrame]:
         '''
@@ -228,7 +232,7 @@ class MCSampler:
         if seed is None:
             seed = self.default_seed
 
-        ctx = get_context("spawn")
+        ctx = get_context("forkserver")
         with ctx.Pool(nproc) as pool:
             
             args = partial(self._sample_worker, num_draws=num_draws, seed=seed)
@@ -238,46 +242,45 @@ class MCSampler:
         
     def _calc_event_weights(self,
                             sample: pd.DataFrame, time_bins: NDArray,
-                            det_fn: function, num_draws: int) -> pd.DataFrame:
+                            zbins: NDArray, det_fn: function, num_draws: int) -> NDArray:
         '''
         Calculate event weights per Gpc3 per yr based on the Bavera+20 monte carlo sum method.
         ### Parameters:
-        - sample: a pd.DataFrame of samples
+        - sample: a pd.DataFrame of samples of size `n`
         - j_Z: an integer representing the metallicity bin
-        - tbins: a numpy.ndarray of shape (i, 2) where i  is the number of time bins
+        - tbins: a numpy.ndarray of shape `(m,)` defining the edges of the time bins to use
+        ### Returns:
+        - NDArray: a 2D array of shape `(n, m)` containing the event weights
         '''
         j_Z: int = np.argmin(np.abs(self.metallicities - sample.metallicity.values[0]))
         _bin: BinariesBin = self.bins[j_Z]
-        
-        # fractional SFR
-        binfrac: float = 0.7
+
         fcorr: float = _bin.fcorr
-        Mtot: Quantity = _bin.Mtot
+        Msim: Quantity = _bin.Msim
         
         n: int = sample.shape[0]
-        m: int = len(time_bins) - 1
+        m: int = len(zbins) - 1
         
-        output_df = pd.DataFrame(columns=np.arange(m), index=sample.index.copy())
+        output: NDArray = np.zeros(shape=(n, m), dtype=float)
         
         for i in range(m):
-            if i == m:
-                break
-            
-            results = pd.Series(np.zeros(n), index = sample.index, name=i)
+            #results = pd.Series(np.zeros(n), index = sample.index, name=i)
+            w_m: NDArray = np.zeros(shape=n) * (u.yr ** -1)
             
             t0 = time_bins[i]
             tf = time_bins[i+1]
-            dt = (tf - t0).to(u.Myr)
-            t_center = (t0 +tf)/2
-            z_center = self.get_z_at_t(t_center)
-            SFR_at_center = np.interp(t_center, self.t, self.SFR)
-            met_frac_at_center = np.interp(t_center, xp=self.t, fp=self.fSFR_at_metallicity[j_Z,:])
-            fSFR_Z = met_frac_at_center * SFR_at_center.to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
+            dt = (tf - t0) * u.Myr
+            t_center = (t0 + tf)/2 * u.Myr
             
             # get systems that merge in the bin
             filter = (sample.t_merge >= t0) & (sample.t_merge < tf)
             systems = sample[filter]
-            f_index = systems.index.values
+            
+            # get SFR for each system
+            SFR_at_center = np.interp(systems.t_form, self.t.value, self.SFR)
+            met_frac_at_center = np.interp(systems.t_form, xp=self.t.value, fp=self.fSFR_at_metallicity[j_Z,:])
+            fSFR_Z = met_frac_at_center * SFR_at_center.to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
+            
             
             # comoving distance to each (individual) sample
             D_z = np.interp(systems.z_merge, self.z.value, self.comoving_distance)
@@ -286,52 +289,105 @@ class MCSampler:
             # we divide the weight by the number of random draws we did for the system;
             # this is to avoid duplicating the contribution (we only simulated it once)
             draw_corr = num_draws ** -1
-                        
-            w =  num_draws * (fSFR_Z/Mtot) * binfrac * fcorr *\
-                (4 * np.pi * const.c) * np.float_power(D_z, 2) * P_det * dt
+            
+            w_m[filter] = (draw_corr * fcorr * (fSFR_Z/Msim) *\
+                (4 * np.pi * const.c) * np.float_power(D_z, 2) * P_det * dt).to(u.yr ** -1)
                 
-            results.loc[f_index] = w.to(u.yr ** -1)
-            output_df[i] = results
+            output[:,i] = w_m.value
         
-        return output_df
+        return output
+    
+    def _bin_weights(self,
+                    operands: tuple[pd.DataFrame, NDArray], zbins: NDArray, mass_bins: NDArray) -> NDArray:
+        
+        sample, w_j = operands
+        i_redshift: int = len(zbins) - 1
+        k_mass: int = len(mass_bins) - 1
+        
+        output: NDArray = np.zeros(shape=(i_redshift, k_mass), dtype=float)
+
+        for i in range(i_redshift):
+            z_lo = zbins[i+1]
+            z_hi = zbins[i]
+            z_filter = (sample.z_merge < z_hi) & (sample.z_merge >= z_lo)
+            
+            for k in range(k_mass):
+                m_lo = mass_bins[k]
+                m_hi = mass_bins[k+1]
+                mass_filter = (sample.mass_1 < m_hi) & (sample.mass_1 >= m_lo)
+
+                s = sample[z_filter & mass_filter]
+                n = s.index
+                w_jik = w_j[n,i]
+                output[i,k] = np.sum(w_jik)                
+
+        return output
     
     def calc_rates(self,
                    samples: list[pd.DataFrame], 
-                   zmin: float, zmax: float, num_draws: int = 100, nproc = 1, **kwargs) -> pd.DataFrame:
-    
-        if zmin < self.z.min():
-            zmin = self.z.min()
-    
-        m: int = len(samples)
-        dt: Quantity = kwargs.get("dt", 100 * u.Myr)
-        time_bin_edges: NDArray = np.arange(self.t[0].value, self.t[-1].value, dt.value) * u.Myr
+                   zrange: list[float, float], mass_bins: NDArray,
+                   dt: Quantity, num_draws: int = 100, nproc = 1, **kwargs) -> tuple[Quantity, NDArray]:
+        '''
+        Calculate and sum the event weights for each system in `samples`.
+        ### Parameters:
+        - samples: an iterable of samples in DataFrame format
+        - zrange: the range of redshifts in which to compute rates; tuple of form (zmin, zmax)
+        - mass_bins: the preferred binning of primary mass values; if this is not passed, will bin in steps of 10 Msun.
+        - num-draws: the number of MC draws performed in the sampling step.
+        - nproc: the number of CPUs to use.
+        ### Returns:
+        - Quantity: the total rate between `zmin` and `zmax`
+        - pd.DataFrame: binned rates as a function of redshift, metallicity. and primary mass
+        '''
+        verbose: bool = kwargs.get("verbose", False)
         
-        k: int = len(time_bin_edges) - 1
-        t_cntr = [(time_bin_edges[i]+time_bin_edges[i+1])/2 for i in range(k)]
-        z_at_cntr: NDArray = np.interp(t_cntr, self.t, self.z)
-        
+        if zrange[0] < self.z.min():
+            print(f"Truncating redshift to sampler's zmin ({self.z.min()})...")
+            zrange[0] = self.z.min()
         if "det_function" not in kwargs.keys():
-            print(f"No detectability function supplied; Using {1}.")
+            print(f"No detectability function supplied; Assuming {1}...")
         det_fn: function = kwargs.get("det_fn", self._dummy_P_det)
-        
-        ctx = get_context("spawn")
+        if mass_bins is None:
+            mass_bins = np.arange(0, 200, 10) # adding Msun later
+        dt: float = kwargs.get("dt", 100)
+            
+        # prepare comoving time bins and corresponding redshift bins
+        if isinstance(dt, Quantity):
+            dt = dt.to(u.Myr).value
+            
+        t0, t1 =  np.interp(zrange, self.z, self.t.value)
+        z0, z1 = zrange
+        time_bins: NDArray = np.arange(t0, t1, dt)
+        redshift_bins: NDArray = self.get_z_at_t((time_bins * u.Myr)).value
+                
+        # multiprocess
+        ctx = get_context("forkserver")
         with ctx.Pool(nproc) as pool:
             args = partial(self._calc_event_weights,\
-                time_bins=time_bin_edges, det_fn=det_fn, num_draws=num_draws)
+                time_bins=time_bins, zbins=redshift_bins, det_fn=det_fn, num_draws=num_draws)
             weights = pool.map(args, samples)
-            
-        z_filter = (z_at_cntr >= zmin) & (z_at_cntr < zmax)
-        bins_in_zrange = np.arange(len(z_at_cntr))[z_filter]
         
-        rates = 0e0
-        for i in range(m):
-            _w = weights[i]
-            _w_in_range = _w.loc[:,bins_in_zrange]
-            rates += _w_in_range.values.sum() 
+        # filter redshift bins into rates calc
+        valid_i = np.asarray(redshift_bins < z1).nonzero()
+        zbins_in_range = redshift_bins[valid_i]
+        print(zbins_in_range)
+        
+        # calculate binned weights for analysis        
+        bin_operands = [(s,w) for s,w in zip(samples, weights)]
+        #with ctx.Pool(nproc) as pool:
+        #    args = partial(self._bin_weights, zbins=zbins_in_range, mass_bins=mass_bins)
+        #    binned_weights = pool.map(args, bin_operands)
+        
+        #binned_weights = np.zeros(shape=(len(self.bins), len(valid_i) - 1, len(mass_bins) - 1))
+        #for j in range(len(self.bins)):
+        #    binned_weights[j,:,:] = self._bin_weights(bin_operands[j], zbins=zbins_in_range, mass_bins=mass_bins)
+        
+        #binned_weights = np.stack(binned_weights)
+        total_rate = np.sum(np.sum(weights))
 
-        return rates * (u.yr ** -1)
+        return total_rate, weights
 
-    def run(self, **kwargs) -> pd.DataFrame:
+    def run(self, **kwargs) -> tuple[Quantity, pd.DataFrame]:
         '''
         Run a rates calculation from start to finish, using the monte-carlo sum method
         explained in Bavera+20: https://doi.org/10.1051/0004-6361/201936204
@@ -352,5 +408,7 @@ class MCSampler:
         nproc: int = kwargs.get("nproc", 1)
         
         rand_sample: list[pd.DataFrame] = self.draw_mc_sample(num_draws, nproc=nproc, seed=seed)
-        rates = self.calc_rates(rand_sample, zlims[0], zlims[1], nproc=nproc)
+        total_rate, binned_rates = self.calc_rates(rand_sample, zlims[0], zlims[1], nproc=nproc)
         
+        return total_rate, binned_rates
+ 
