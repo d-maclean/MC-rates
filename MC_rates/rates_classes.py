@@ -192,7 +192,7 @@ class MCSampler:
             valid_time = random_sample[i,:][valid_i]
             k = len(valid_time)
             n_valid_samples[i] = k
-            sample_list = np.concat([sample_list, valid_time])
+            sample_list = np.concatenate([sample_list, valid_time])
             
         # write output
         data_dict = {
