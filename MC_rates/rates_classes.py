@@ -276,11 +276,10 @@ class MCSampler:
             filter = (sample.t_merge >= t0) & (sample.t_merge < tf)
             systems = sample[filter]
             
-            # get SFR for each system
-            SFR_at_center = np.interp(systems.t_form, self.t.value, self.SFR)
-            met_frac_at_center = np.interp(systems.t_form, xp=self.t.value, fp=self.fSFR_at_metallicity[j_Z,:])
-            fSFR_Z = met_frac_at_center * SFR_at_center.to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
-            
+            # get SFH for each system
+            SFR_per_system = np.interp(systems.t_form, self.t.value, self.SFR)
+            SFR_z_per_system = np.interp(systems.t_form, xp=self.t.value, fp=self.fSFR_at_metallicity[j_Z,:])
+            SFH_per_system = SFR_z_per_system * SFR_per_system.to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
             
             # comoving distance to each (individual) sample
             D_z = np.interp(systems.z_merge, self.z.value, self.comoving_distance)
@@ -288,9 +287,9 @@ class MCSampler:
             
             # we divide the weight by the number of random draws we did for the system;
             # this is to avoid duplicating the contribution (we only simulated it once)
-            draw_corr = num_draws ** -1
+            draw_corr = np.float_power(num_draws, -1)
             
-            w_m[filter] = (draw_corr * fcorr * (fSFR_Z/Msim) *\
+            w_m[filter] = (draw_corr * fcorr * (SFH_per_system/Msim) *\
                 (4 * np.pi * const.c) * np.float_power(D_z, 2) * P_det * dt).to(u.yr ** -1)
                 
             output[:,i] = w_m.value
