@@ -116,11 +116,18 @@ def init_sampler(t0: Quantity, tf: Quantity,
     return params
 
 def calc_MC_rates(sampler: MCParams,
-                  n: int = 100, seed: int = 0, nproc: int = 1, **kwargs) -> pd.DataFrame:
+                  n: int = 100, seed: int = 0, **kwargs) -> pd.DataFrame:
     '''
-    Calculate rates by taking a monte-carlo sum with binaries from `sampler`. 
+    Calculate rates by taking a monte-carlo sum with binaries from `sampler`.
+    ### Parameters:
+    - n: int - the number of monte-carlo samples to draw from each system
+    - seed: int - the pseudorandom seed 
+    #### Kwargs:
+    - dt: Quantity - the time interval to determine comoving time bins
+    - detectability_function: function - the function accounting for detector effects
+    ### Returns:
+    - DataFrame - a dataframe of MC samples, weights, and detectability
     '''
-    
     bins: list[CosmicBinaries] = sampler.bins
     
     dt: Quantity = kwargs.get("dt", 100 * u.Myr)
@@ -152,7 +159,7 @@ def calc_MC_rates(sampler: MCParams,
         sample_list = np.array([], dtype=float)
         num_valid_samples = np.zeros(n_k, dtype=np.int64)
         
-        print('zbin:', j_Z, 'shape:', harvest.shape)
+        #print('zbin:', j_Z, 'shape:', harvest.shape)
         for i in range(n_k):
             valid_i = (harvest[i,:] + t_delay[i]) < t_max
             valid_time = harvest[i,:][valid_i]
@@ -193,7 +200,10 @@ def calc_MC_rates(sampler: MCParams,
 
 def _calc_intrinsic_weights(sampler: MCParams,
                   j_Z: int, data: dict[str:NDArray], num_draws: int, dt: Quantity, time_bins: NDArray) -> NDArray:
-    
+    '''
+    We assign each event in our MC sample a 'weight' in the same fashion as described in Dominik et al. 2015,
+    Bavera et al. 2020, to calculate rates.
+    '''
     dt = dt.to(u.Myr)
     i_t: int = time_bins.shape[0] - 1
     output = np.zeros(data["t_form"].shape[0])
