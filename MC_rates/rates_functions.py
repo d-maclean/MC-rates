@@ -33,3 +33,8 @@ def calc_SFR_madau_fragos(redshift: float | NDArray) -> Quantity | NDArray:
     psi_z = 1e-2 * numerator/denominator * units
 
     return psi_z
+
+def trivial_Pdet(data: dict) -> NDArray:
+    '''Returns ones; for calculating intrinsic rates.'''
+    n: int = data["bin_num"].shape[0]
+    return np.ones(shape=n, dtype=float)
