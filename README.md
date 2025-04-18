@@ -1,6 +1,6 @@
 # MC-rates
 
-This package provides two classes and some functions to perform transient event rates calculations using
+This package provides two classes and some functions to perform transient DCO merger event rates calculations using
 binary populations evolved with [COSMIC](https://github.com/COSMIC-PopSynth/COSMIC). Theoretically it can work with other formats, but I haven't implemented any yet. 
 
 ### Installation
@@ -28,8 +28,10 @@ sampler = init_sampler(t0, tf, files)
 
 # draw 100 samples in time for each system, weighted by the relative
 # star formation density of each metallicity across cosmic time
-# use the sample to calculate merger rates between 0 < z < 0.1
-rates = calc_MC_rates(sampler, n=100, seed=0)
+# use the sample to calculate merger rates, which are returned as a
+# dataframe of event weights for each sample.
+weights = calc_MC_rates(sampler, n=100, seed=0)
+rates = weights[your z/Z/mass filter here].sum
 ```
 
 ### References & Further Reading
