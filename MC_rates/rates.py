@@ -5,7 +5,7 @@ import sys
 import numpy as np
 from multiprocessing import get_context
 from astropy import units as u, constants as const
-from scipy.stats import norm
+from scipy.stats import norm, truncnorm
 from astropy.cosmology import Cosmology, Planck18, z_at_value
 from dataclasses import dataclass
 import pandas as pd
@@ -57,15 +57,15 @@ class MCParams:
     cosmology: Cosmology
     cmv_time: NDArray[u.Myr] # (num_pts,)
     redshift: NDArray
-    cmv_distance: NDArray[u.Mpc]
-    cmv_volume: NDArray
     SFR_at_z: NDArray 
     
     # metallicity and binaries
+    metallicities: list[float]
     bins: list[CosmicBinaries] # (j,)
     mean_met_at_z: NDArray # (num_pts,)
     fractional_SFR_at_met: NDArray # shape (j, num_pts)
-    convolved_SFR: NDArray # shape (j, num_pts)
+    weighted_SFR: NDArray # shape (j, num_pts)
+    fcorr_SFR_fracs: NDArray # shape (num_pts) -- for correcting unmodeled SFR
 
     @classmethod
     def init_sampler(cls, t0: Quantity, tf: Quantity,
@@ -88,8 +88,6 @@ class MCParams:
         
         comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
         redshift = z_at_value(cosmo.age, comoving_time)
-        comoving_distance = cosmo.comoving_distance(redshift).to(u.Mpc)
-        comoving_volume = cosmo.comoving_volume(redshift).to(u.Gpc**3)
         
         # load binaries from COSMIC
         bins_list = load_cosmic_bins(filepaths_to_bins)
@@ -103,29 +101,40 @@ class MCParams:
         log_Z = np.log10(metallicities)
         log_avgZ =  np.log10(mean_met_at_z)
         
-        # get the fractional SFR of each metallicity at each time
         for n in range(num_pts):
             fracSFR[:,n] = norm.pdf(x=log_Z, loc=log_avgZ[n], scale=logZ_sigma_for_SFR)
         
-        # convolve the fractional SFR(Z) with the total SFR(z) to get SFR(z,Z)
-        convolved_SFR = np.zeros(shape=(l_j, num_pts), dtype=float)
+        # weight the fractional SFR(Z) by the total SFR(z) to get SFR(z,Z)
+        weighted_SFR = np.zeros(shape=(l_j, num_pts), dtype=float)
         for j in range(l_j):
-            fSFR = fracSFR[j,:]
-            weighted_fSFR = fSFR * (SFR_at_z/SFR_at_z.sum())
-            convolved_SFR[j,:] = weighted_fSFR/weighted_fSFR.sum()
+            _fSFR = fracSFR[j,:]
+            weighted_SFR[j,:] = _fSFR * SFR_at_z
+            
+        # calculate fcorr_SFR_fracs for missing metallicity
+        # this suggested by Mike to avoid over-modeling mass outside
+        # of our model range
+        fcorr_SFR_fracs = np.zeros(shape=num_pts)
+        minZ, maxZ = metallicities[0], metallicities[-1]
+        test_range = np.linspace(1e-9, 1, 1000)
+        low_pt = np.argmin(np.abs(test_range - minZ))
+        hi_pt = np.argmin(np.abs(test_range - maxZ))
+        for i in range(num_pts):
+            total_SFR_pdf = norm.pdf(np.log10(test_range/0.02), loc=np.log10(mean_met_at_z[i]), scale=logZ_sigma_for_SFR)
+            total_SFR_pdf = total_SFR_pdf/np.sum(total_SFR_pdf) # normalize
+            fcorr_SFR_fracs[i] = np.sum(total_SFR_pdf[low_pt:hi_pt])
         
         # create our object and return
         params = cls(
             cosmology=cosmo,
             cmv_time=comoving_time,
             redshift=redshift,
-            cmv_distance=comoving_distance,
-            cmv_volume=comoving_volume,
             SFR_at_z=SFR_at_z,
+            metallicities=metallicities,
             bins=bins_list,
             mean_met_at_z=mean_met_at_z,
             fractional_SFR_at_met=fracSFR,
-            convolved_SFR=convolved_SFR
+            weighted_SFR=weighted_SFR,
+            fcorr_SFR_fracs=fcorr_SFR_fracs
         )
         return params
 
@@ -156,8 +165,8 @@ class MCParams:
             mergers: pd.DataFrame = m.merger_data
             n_k: int = mergers.index.shape[0]
             
-            # trying with convolved SFR
-            fracSFR_pdf_at_met = self.convolved_SFR[j_Z,:]
+            # trying with weighted SFR
+            fracSFR_pdf_at_met = self.weighted_SFR[j_Z,:]
             
             # get system statistics
             bin_num = mergers.bin_num.values
@@ -168,21 +177,15 @@ class MCParams:
             t_delay = mergers.t_delay.values
             
             # sample formation times with ITM
-            harvest = self.inverse_transform_sample(
+            harvest = self._inverse_transform_sample(
                 (n_k, n), fracSFR_pdf_at_met, self.cmv_time, seed)
             
             t_max = self.cmv_time.max().to(u.Myr).value
             sample_list = np.array([], dtype=float)
             num_valid_samples = np.zeros(n_k, dtype=np.int64)
             
-            #print('zbin:', j_Z, 'shape:', harvest.shape)
-            for i in range(n_k):
-                valid_i = (harvest[i,:] + t_delay[i]) < t_max
-                valid_time = harvest[i,:][valid_i]
-                k = np.sum(valid_i).astype(int)
-                num_valid_samples[i] = k
-                sample_list = np.append(sample_list, valid_time, axis=0)
-            
+            num_valid_samples = np.ones(n_k, dtype=np.int64) * n
+            sample_list = np.reshape(harvest, n_k*n)
                 
             columns = {
                 "bin_num": np.repeat(bin_num, num_valid_samples),
@@ -195,11 +198,11 @@ class MCParams:
                 "t_form": sample_list,
                 "z_form": np.interp(sample_list, self.cmv_time.value, self.redshift),
                 "t_merge": sample_list + np.repeat(t_delay, num_valid_samples),
-                "z_merge": np.interp(sample_list, self.cmv_time.value, self.redshift),
+                "z_merge": np.interp(sample_list+np.repeat(t_delay, num_valid_samples), self.cmv_time.value, self.redshift, right=np.nan),
                 }
             
             columns["P_det"] = detectability_function(columns)
-            columns["Rate"] = self._calc_intrinsic_rates(self, j_Z, columns, n, dt, time_bins)
+            columns["Rate"] = self._calc_intrinsic_rates(j_Z, columns, n, dt, time_bins)
             
             dicts.append(columns)
             
@@ -232,16 +235,14 @@ class MCParams:
             z_form = data["z_form"][idx]
             
             # star formation history
-            SFR_at_z: NDArray =  np.interp(z_form, self.redshift, self.SFR_at_z)
-            met_frac_at_z: float = np.interp(z_form, self.redshift, self.fractional_SFR_at_met[j_Z,:])
+            SFR_at_z: NDArray =  np.interp(z_form, self.redshift[::-1], self.SFR_at_z[::-1]) # TODO
+            met_frac_at_z: float = np.interp(z_form, self.redshift[::-1], self.fractional_SFR_at_met[j_Z,:][::-1]) # TODO
             SFH_jz = (SFR_at_z * met_frac_at_z).to(u.Msun * u.yr ** -1 * u.Gpc ** -3)
+            fcorr_SFR_fracs = np.interp(z_form, self.redshift[::-1], self.fcorr_SFR_fracs[::-1]) # TODO
             
-            # comoving distance
-            #D_z = np.interp(z_event, sampler.redshift, sampler.cmv_distance).to(u.Mpc)
-            
-            rate = self.bins[j_Z].f_corr * (1/num_draws) * \
+            # intrinsic merger rate -- see Dominik+13 eq. 16             
+            rate = self.bins[j_Z].f_corr * (1/num_draws) * fcorr_SFR_fracs *\
                 SFH_jz * (self.bins[j_Z].total_star_mass ** -1)# * \
-                #(4 * np.pi * dt.to(u.yr)) * np.diff(np.interp(np.array([t1, t0]) * u.Myr, sampler.cmv_time, sampler.cmv_volume))
                             
             rate = rate.to(u.yr ** -1 * u.Gpc ** -3)
             output[idx] = rate
@@ -269,6 +270,7 @@ class MCParams:
         Z_pdf = fracSFR_pdf_at_met
         norm_pdf = (Z_pdf / np.sum(Z_pdf)) # normalize
         cdf = np.cumsum(norm_pdf)
+        #print(cdf[-1])
 
         gen = np.random.default_rng(seed=seed)
         choices = gen.random(size=shape)
