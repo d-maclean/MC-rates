@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import sys
 import numpy as np
 from multiprocessing import get_context
 from astropy import units as u, constants as const
@@ -14,13 +12,13 @@ from numpy.typing import NDArray
 from astropy.units import Quantity
 
 from rates_functions import calc_mean_metallicity_madau_fragos,\
-    calc_SFR_madau_fragos, trivial_Pdet
+    calc_SFR_madau_fragos, trivial_Pdet, process_cosmic_models
 
 
 @dataclass
 class Model:
     metallicity: float
-    initC: pd.DataFrame
+    initCond: pd.DataFrame
     mergers: pd.DataFrame
     
     # pop statistics
@@ -52,7 +50,8 @@ class Model:
             if is_prefiltered:
                 mergers = pd.read_hdf(f, key="mergers")
             else:
-                raise NotImplementedError()
+                _bpp = pd.read_hdf(f, key="bpp")
+                mergers = process_cosmic_models(_bpp)
             
             n_singles: int = pd.read_hdf(f, key="n_singles").values.sum()
             n_binaries: int = pd.read_hdf(f, key="n_binaries").values.sum()
@@ -61,13 +60,17 @@ class Model:
             mass_singles: float = pd.read_hdf(f, key="mass_singles").values.sum()
             mass_binaries: float = pd.read_hdf(f, key="mass_binaries").values.sum()            
             Msim: Quantity = (mass_singles + mass_binaries) * u.Msun
-            Mpop: Quantity = (initCond.mass_1.sum() + initCond.mass_2.sum()) * u.Msun
-
+            
+            if is_prefiltered:
+                Mpop: Quantity = pd.read_hdf(f, key="total_sampled_mass").values.sum() * u.Msun
+            else:
+                Mpop: Quantity = (initCond.mass_1.sum() + initCond.mass_2.sum()) * u.Msun
+            
             f_corr = Mpop/Msim
             
             data = {
                 "metallicity": metallicity,
-                "initC": initCond,
+                "initCond": initCond,
                 "mergers": mergers,
                 "n_singles": n_singles,
                 "n_binaries": n_binaries,
