@@ -24,10 +24,10 @@ class Model:
     # pop statistics
     n_singles: int
     n_binaries: int
-    binfrac_model: float
-    total_star_mass: Quantity["mass"]
-    simulated_mass: Quantity["mass"]
-    imf_f_corr: float
+    binfrac_model: float = 0.7
+    total_star_mass: Quantity["mass"] = 0.0 * u.Msun
+    simulated_mass: Quantity["mass"] = 0.0 * u.Msun
+    imf_f_corr: float = 1.0
 
     @classmethod
     def load_cosmic_models(cls, filepaths: str | list[str], is_prefiltered: bool = True) -> list[Model]:
@@ -62,7 +62,7 @@ class Model:
             Msim: Quantity = (mass_singles + mass_binaries) * u.Msun
             
             if is_prefiltered:
-                Mpop: Quantity = pd.read_hdf(f, key="total_sampled_mass").values.sum() * u.Msun
+                Mpop: Quantity = pd.read_hdf(f, key="total_kept_mass").values.sum() * u.Msun
             else:
                 Mpop: Quantity = (initCond.mass_1.sum() + initCond.mass_2.sum()) * u.Msun
             
