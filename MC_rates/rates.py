@@ -18,38 +18,71 @@ from rates_functions import calc_mean_metallicity_madau_fragos,\
 
 
 @dataclass
-class CosmicBinaries:
+class Model:
     metallicity: float
     initC: pd.DataFrame
-    merger_data: pd.DataFrame
+    mergers: pd.DataFrame
     
     # pop statistics
-    init_info: pd.DataFrame
+    n_singles: int
+    n_binaries: int
+    binfrac_model: float
     total_star_mass: Quantity["mass"]
     simulated_mass: Quantity["mass"]
-    f_corr: float
+    imf_f_corr: float
 
-def load_cosmic_bins(filepaths: str | list[str]) -> list[CosmicBinaries]:
-    '''Load cosmic models from hdf5.'''
-    if isinstance(filepaths, str):
-        filepaths = [filepaths]
-    
-    output = []
-    for f in filepaths:
-        _initC = pd.read_hdf(f, "initC")
-        _Zval = _initC.metallicity.values[0]
-        _merger_data = pd.read_hdf(f, "merger_data")
-        _initInfo = pd.read_hdf(f, "init_info")
-        Mpop = _initInfo.Msim.values[0] * u.Msun
-        Msim = _initInfo.Msystems.values[0] * u.Msun
-        f_corr = Msim/Mpop
-        struct = CosmicBinaries(_Zval, _initC, _merger_data, _initInfo, Mpop, Msim, f_corr)
-        output.append(struct)
-    
-    sort_fn = lambda x: x.metallicity
-    output = sorted(output, key=sort_fn)
-    return output
+    @classmethod
+    def load_cosmic_models(cls, filepaths: str | list[str], is_prefiltered: bool = True) -> list[Model]:
+        '''
+        Load cosmic models and return them as a list
+        ### Parameters:
+        - filepaths: list - a list of h5 files
+        - is_prefiltered: bool = True - whether the data has been pre-winnowed to a list of merging systems
+        ### Returns:
+        - list[Model]
+        '''
+        if isinstance(filepaths, str):
+            filepaths = [filepaths]
+        
+        models = []
+        for f in filepaths:
+            initCond: pd.DataFrame = pd.read_hdf(f, key="initCond")
+            metallicity: float = initCond.metallicity.values[0]
+            
+            if is_prefiltered:
+                mergers = pd.read_hdf(f, key="mergers")
+            else:
+                raise NotImplementedError()
+            
+            n_singles: int = pd.read_hdf(f, key="n_singles").values.sum()
+            n_binaries: int = pd.read_hdf(f, key="n_binaries").values.sum()
+            binfrac_model: float = n_binaries / n_singles
+            
+            mass_singles: float = pd.read_hdf(f, key="mass_singles").values.sum()
+            mass_binaries: float = pd.read_hdf(f, key="mass_binaries").values.sum()            
+            Msim: Quantity = (mass_singles + mass_binaries) * u.Msun
+            Mpop: Quantity = (initCond.mass_1.sum() + initCond.mass_2.sum()) * u.Msun
 
+            f_corr = Mpop/Msim
+            
+            data = {
+                "metallicity": metallicity,
+                "initC": initCond,
+                "mergers": mergers,
+                "n_singles": n_singles,
+                "n_binaries": n_binaries,
+                "binfrac_model": binfrac_model,
+                "total_star_mass": Mpop,
+                "total_simulated_mass": Msim,
+                "imf_f_corr": f_corr
+                }
+            
+            struct = cls(**data)
+            models.append(struct)
+        
+        sort_fn = lambda x: x.metallicity
+        models = sorted(models, key=sort_fn)
+        return models
 
 @dataclass
 class MCParams:
@@ -61,7 +94,7 @@ class MCParams:
     
     # metallicity and binaries
     metallicities: list[float]
-    bins: list[CosmicBinaries] # (j,)
+    bins: list[Model] # (j,)
     mean_met_at_z: NDArray # (num_pts,)
     fractional_SFR_at_met: NDArray # shape (j, num_pts)
     weighted_SFR: NDArray # shape (j, num_pts)
@@ -90,7 +123,7 @@ class MCParams:
         redshift = z_at_value(cosmo.age, comoving_time)
         
         # load binaries from COSMIC
-        bins_list = load_cosmic_bins(filepaths_to_bins)
+        bins_list = Model.load_cosmic_models(filepaths_to_bins, is_prefiltered=True)
         l_j = len(bins_list)
         metallicities = [x.metallicity for x in bins_list]
         
@@ -152,7 +185,7 @@ class MCParams:
         ### Returns:
         - DataFrame - a dataframe of MC samples, weights, and detectability
         '''
-        bins: list[CosmicBinaries] = self.bins
+        bins: list[Model] = self.bins
         
         dt: Quantity = kwargs.get("dt", 100 * u.Myr)
         detectability_function: function = kwargs.get("detectability_function", trivial_Pdet)
@@ -162,7 +195,7 @@ class MCParams:
         
         for j_Z, m in enumerate(bins):
             metallicity: float = m.metallicity
-            mergers: pd.DataFrame = m.merger_data
+            mergers: pd.DataFrame = m.mergers
             n_k: int = mergers.index.shape[0]
             
             # trying with weighted SFR
@@ -241,7 +274,7 @@ class MCParams:
             fcorr_SFR_fracs = np.interp(z_form, self.redshift[::-1], self.fcorr_SFR_fracs[::-1]) # TODO
             
             # intrinsic merger rate -- see Dominik+13 eq. 16             
-            rate = self.bins[j_Z].f_corr * (1/num_draws) * fcorr_SFR_fracs *\
+            rate = self.bins[j_Z].imf_f_corr * (1/num_draws) * fcorr_SFR_fracs *\
                 SFH_jz * (self.bins[j_Z].total_star_mass ** -1)# * \
                             
             rate = rate.to(u.yr ** -1 * u.Gpc ** -3)
