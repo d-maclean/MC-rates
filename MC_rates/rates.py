@@ -159,7 +159,7 @@ class MCParams:
         # create our object and return
         params = cls(
             cosmology=cosmo,
-w            comoving_time=comoving_time,
+            comoving_time=comoving_time,
             redshift=redshift,
             SFR_at_z=SFR_at_z,
             metallicities=metallicities,
