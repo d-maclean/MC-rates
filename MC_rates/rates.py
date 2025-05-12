@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
-from multiprocessing import get_context
 from astropy import units as u, constants as const
 from scipy.stats import norm, truncnorm
+from scipy.integrate import quad
+from functools import partial
 from astropy.cosmology import Cosmology, Planck18, z_at_value
 from dataclasses import dataclass
 import pandas as pd
@@ -76,7 +77,7 @@ class Model:
                 "n_binaries": n_binaries,
                 "binfrac_model": binfrac_model,
                 "total_star_mass": Mpop,
-                "total_simulated_mass": Msim,
+                "simulated_mass": Msim,
                 "imf_f_corr": f_corr
                 }
             
@@ -89,9 +90,9 @@ class Model:
 
 @dataclass
 class MCParams:
-    '''Object to contain all info for MC sampling.'''
+    '''Object to contain all info for rates calculation.'''
     cosmology: Cosmology
-    cmv_time: NDArray[u.Myr] # (num_pts,)
+    comoving_time: NDArray[u.Myr] # (num_pts,)
     redshift: NDArray
     SFR_at_z: NDArray 
     
@@ -100,7 +101,6 @@ class MCParams:
     bins: list[Model] # (j,)
     mean_met_at_z: NDArray # (num_pts,)
     fractional_SFR_at_met: NDArray # shape (j, num_pts)
-    weighted_SFR: NDArray # shape (j, num_pts)
     fcorr_SFR_fracs: NDArray # shape (num_pts) -- for correcting unmodeled SFR
 
     @classmethod
@@ -130,49 +130,139 @@ class MCParams:
         l_j = len(bins_list)
         metallicities = [x.metallicity for x in bins_list]
         
-        # calculate SFR and the fraction of SFR per metallicity at each time value
-        mean_met_at_z = avg_met_function(redshift)
+        # get Star Formation info
         SFR_at_z = sfr_function(redshift).to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
-        fracSFR = np.zeros(shape=(l_j, num_pts), dtype=float)
-        log_Z = np.log10(metallicities)
-        log_avgZ =  np.log10(mean_met_at_z)
+        mean_metallicity_at_z = avg_met_function(redshift)
         
-        for n in range(num_pts):
-            fracSFR[:,n] = norm.pdf(x=log_Z, loc=log_avgZ[n], scale=logZ_sigma_for_SFR)
-        
-        # weight the fractional SFR(Z) by the total SFR(z) to get SFR(z,Z)
-        weighted_SFR = np.zeros(shape=(l_j, num_pts), dtype=float)
-        for j in range(l_j):
-            _fSFR = fracSFR[j,:]
-            weighted_SFR[j,:] = _fSFR * SFR_at_z
+        # use a lognormal PDF to estimate the fraction of each metallicity bin forming at each time point
+        fracSFR = np.zeros(shape=(l_j, num_pts), dtype=float) * (u.Msun * u.yr ** -1 * u.Mpc ** -3)
+        for i in range(num_pts):
+            log_avgZ = np.log10(mean_metallicity_at_z[i])
+            Z_pdf = norm.pdf(x=np.log10(metallicities), loc=log_avgZ, scale=0.5)
+            Z_pdf /= Z_pdf.sum()
+            fracSFR[:,i] = SFR_at_z[i] * Z_pdf
             
         # calculate fcorr_SFR_fracs for missing metallicity
         # this suggested by Mike to avoid over-modeling mass outside
         # of our model range
         fcorr_SFR_fracs = np.zeros(shape=num_pts)
-        minZ, maxZ = metallicities[0], metallicities[-1]
-        test_range = np.linspace(1e-9, 1, 1000)
-        low_pt = np.argmin(np.abs(test_range - minZ))
-        hi_pt = np.argmin(np.abs(test_range - maxZ))
-        for i in range(num_pts):
-            total_SFR_pdf = norm.pdf(np.log10(test_range/0.02), loc=np.log10(mean_met_at_z[i]), scale=logZ_sigma_for_SFR)
-            total_SFR_pdf = total_SFR_pdf/np.sum(total_SFR_pdf) # normalize
-            fcorr_SFR_fracs[i] = np.sum(total_SFR_pdf[low_pt:hi_pt])
+        
+        #minZ, maxZ = metallicities[0], metallicities[-1]
+        #test_logZ = np.linspace(-10, 0, 1000)
+        #low_pt = np.argmin(np.abs(test_logZ - minZ))
+        #hi_pt = np.argmin(np.abs(test_logZ - maxZ))
+        #for i in range(num_pts):
+        #    total_SFR_pdf = norm.pdf(test_logZ, loc=np.log10(mean_metallicity_at_z[i]), scale=logZ_sigma_for_SFR)
+        #    total_SFR_pdf = total_SFR_pdf/np.sum(total_SFR_pdf) # normalize
+        #    fcorr_SFR_fracs[i] = np.sum(total_SFR_pdf[low_pt:hi_pt])
         
         # create our object and return
         params = cls(
             cosmology=cosmo,
-            cmv_time=comoving_time,
+w            comoving_time=comoving_time,
             redshift=redshift,
             SFR_at_z=SFR_at_z,
             metallicities=metallicities,
             bins=bins_list,
-            mean_met_at_z=mean_met_at_z,
+            mean_met_at_z=mean_metallicity_at_z,
             fractional_SFR_at_met=fracSFR,
-            weighted_SFR=weighted_SFR,
             fcorr_SFR_fracs=fcorr_SFR_fracs
         )
         return params
+    
+    def calc_merger_rates_dz(self, zbins: int | NDArray, local_z: float = 0.1) -> tuple:
+        '''
+        Calculate DCO merger rates for the sample following Dominik et al. 2013 Eq. 16. 
+        ### Parameters:
+        - zbins: int | NDArray
+        - local_z: float = 0.1
+        ### Returns:
+        - tuple - local Rate, local bbh rate, local bhns rate, local bns rate, raw data
+        '''
+        if (isinstance(zbins, np.ndarray)):
+            if (zbins < 0).any():
+                raise ValueError('Redshift must be positive!')
+            elif (np.diff(zbins) < 0).any():
+                zbins = zbins[::-1]
+                if (np.diff(zbins) < 0).any():
+                    raise ValueError('Cannot coerce `zbins` to be monotonically increasing...')
+            
+        if isinstance(zbins, int):
+            lgzmin = np.log10(self.redshift.min())
+            lgzmax = np.log10(self.redshift.max())
+            zbins: NDArray = np.logspace(lgzmin.value, lgzmax.value, zbins)
+        
+        cosmo: Cosmology = self.cosmology
+        n: int = zbins.shape[0] - 1
+        
+        VOLRATE = u.yr ** -1 * u.Gpc ** -3 # unit
+        
+        data: dict[str:NDArray] = {
+            "z_i": np.zeros(shape=n),
+            "z_f": np.zeros(shape=n),
+            "z_center": np.zeros(shape=n),
+            "t_center": np.zeros(shape=n) * u.Myr,
+            "E_z": np.zeros(shape=n),
+            "R_bbh": np.zeros(shape=n) * VOLRATE,
+            "R_bhns": np.zeros(shape=n) * VOLRATE,
+            "R_bns": np.zeros(shape=n) * VOLRATE,
+            "R_tot": np.zeros(shape=n) * VOLRATE
+        }
+        
+        for i in range(n):
+            z_i = zbins[i]
+            z_f = zbins[i+1]
+            dz = np.abs(z_f-z_i)
+            z_center: float = np.mean(zbins[i:i+2])
+            t_center: Quantity = cosmo.age(z_center).to(u.Myr)
+        
+            # dimensionless Hubble parameter
+            E_z: float = np.sqrt(cosmo._Onu0*(1+z_center)**4 + \
+                cosmo._Om0*(1+z_center)**3 + cosmo._Ok0*(1+z_center)**2 + cosmo._Ode0)
+
+            R_bbh = 0 * VOLRATE
+            R_bns = 0 * VOLRATE
+            R_bhns = 0 * VOLRATE
+
+            for j, Zbin in enumerate(self.bins):
+                
+                f_corr: float = Zbin.imf_f_corr
+                Msim: Quantity = Zbin.simulated_mass
+
+                systems: pd.DataFrame = Zbin.mergers[Zbin.mergers.t_delay < t_center.value + self.comoving_time.min().value]
+                bbh_systems: NDArray = (systems.kstar_1 == 14) & (systems.kstar_2 == 14)
+                bns_systems: NDArray = (systems.kstar_1 == 13) & (systems.kstar_2 == 13)
+                bhns_systems: NDArray = ((systems.kstar_1 == 13) & (systems.kstar_2 == 14))\
+                    | ((systems.kstar_1 == 14) & (systems.kstar_2 == 13))
+                t_form: NDArray = t_center - (systems.t_delay.values * u.Myr)
+                frac_SFR_per_sys: NDArray = np.interp(
+                    t_form, self.comoving_time, self.fractional_SFR_at_met[j,:]).to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
+                
+                Rate_per_sys: NDArray = \
+                    (f_corr * (frac_SFR_per_sys/Msim) * dz/((1+z_center) * E_z)).to(VOLRATE)
+                
+                R_bbh += Rate_per_sys[bbh_systems].sum()
+                R_bns += Rate_per_sys[bns_systems].sum()
+                R_bhns += Rate_per_sys[bhns_systems].sum()
+
+            data["z_i"][i] = z_i
+            data["z_f"][i] = z_f
+            data["z_center"][i] = z_center
+            data["t_center"][i] = t_center
+            data["E_z"][i] = E_z
+            data["R_bbh"][i] = R_bbh
+            data["R_bhns"][i] = R_bhns
+            data["R_bns"][i] = R_bns
+            data["R_tot"][i] = R_bbh + R_bhns + R_bns
+            
+        calc_R_local = lambda x: ((1/(cosmo._H0 * cosmo.lookback_time(local_z))) * x.sum()).to(VOLRATE)
+        
+        R_local_tot = calc_R_local(data["R_tot"][data["z_center"] <= local_z])
+        R_local_bbh = calc_R_local(data["R_bbh"][data["z_center"] <= local_z])
+        R_local_bhns = calc_R_local(data["R_bhns"][data["z_center"] <= local_z])
+        R_local_bns = calc_R_local(data["R_bns"][data["z_center"] <= local_z])
+        
+        return R_local_tot, R_local_bbh, R_local_bhns, R_local_bns, data
 
 
     def calc_MC_rates(self: MCParams,
@@ -192,7 +282,7 @@ class MCParams:
         
         dt: Quantity = kwargs.get("dt", 100 * u.Myr)
         detectability_function: function = kwargs.get("detectability_function", trivial_Pdet)
-        time_bins: NDArray = np.arange(self.cmv_time[0].value, self.cmv_time[-1].value, dt.value)
+        time_bins: NDArray = np.arange(self.comoving_time[0].value, self.comoving_time[-1].value, dt.value)
         
         dicts = []
         
@@ -214,9 +304,9 @@ class MCParams:
             
             # sample formation times with ITM
             harvest = self._inverse_transform_sample(
-                (n_k, n), fracSFR_pdf_at_met, self.cmv_time, seed)
+                (n_k, n), fracSFR_pdf_at_met, self.comoving_time, seed)
             
-            t_max = self.cmv_time.max().to(u.Myr).value
+            t_max = self.comoving_time.max().to(u.Myr).value
             sample_list = np.array([], dtype=float)
             num_valid_samples = np.zeros(n_k, dtype=np.int64)
             
@@ -232,9 +322,9 @@ class MCParams:
                 "kstar_2": np.repeat(kstar_2, num_valid_samples),
                 "t_delay": np.repeat(t_delay, num_valid_samples),
                 "t_form": sample_list,
-                "z_form": np.interp(sample_list, self.cmv_time.value, self.redshift),
+                "z_form": np.interp(sample_list, self.comoving_time.value, self.redshift),
                 "t_merge": sample_list + np.repeat(t_delay, num_valid_samples),
-                "z_merge": np.interp(sample_list+np.repeat(t_delay, num_valid_samples), self.cmv_time.value, self.redshift, right=np.nan),
+                "z_merge": np.interp(sample_list+np.repeat(t_delay, num_valid_samples), self.comoving_time.value, self.redshift, right=np.nan),
                 }
             
             columns["P_det"] = detectability_function(columns)
