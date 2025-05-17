@@ -8,9 +8,11 @@ from functools import partial
 from astropy.cosmology import Cosmology, Planck18, z_at_value
 from dataclasses import dataclass
 import pandas as pd
+from tqdm import tqdm
 
 from numpy.typing import NDArray
 from astropy.units import Quantity
+from typing import ClassVar
 
 from rates_functions import calc_mean_metallicity_madau_fragos,\
     calc_SFR_madau_fragos, trivial_Pdet, process_cosmic_models
@@ -56,7 +58,7 @@ class Model:
             
             n_singles: int = pd.read_hdf(f, key="n_singles").values.sum()
             n_binaries: int = pd.read_hdf(f, key="n_binaries").values.sum()
-            binfrac_model: float = n_binaries / n_singles
+            binfrac_model: float = n_binaries / (n_binaries + n_singles)
             
             mass_singles: float = pd.read_hdf(f, key="mass_singles").values.sum()
             mass_binaries: float = pd.read_hdf(f, key="mass_binaries").values.sum()            
@@ -89,7 +91,7 @@ class Model:
         return models
 
 @dataclass
-class MCParams:
+class MCRates:
     '''Object to contain all info for rates calculation.'''
     cosmology: Cosmology
     comoving_time: NDArray[u.Myr] # (num_pts,)
@@ -102,19 +104,20 @@ class MCParams:
     mean_met_at_z: NDArray # (num_pts,)
     fractional_SFR_at_met: NDArray # shape (j, num_pts)
     fcorr_SFR_fracs: NDArray # shape (num_pts) -- for correcting unmodeled SFR
+    VOLRATE: ClassVar[Quantity] = u.yr ** -1 * u.Gpc ** -3
 
     @classmethod
     def init_sampler(cls, t0: Quantity, tf: Quantity,
-                    filepaths_to_bins: list[str], **kwargs) -> MCParams:
+                    filepaths_to_bins: list[str], **kwargs) -> MCRates:
         '''
-        Create an MCParams instance with all the necessary information to
+        Create an MCRates instance with all the necessary information to
         draw samples and calculate rates.
         ### Parameters:
         - t0, tf: Quantity - earliest and latest comoving time values
         - filepaths_to_bins: list[str] - the location at which to find models
         - **kwargs
         ### Returns:
-        - MCParams
+        - MCRates
         '''
         cosmo: Cosmology = kwargs.get("cosmology", Planck18)
         num_pts: int = kwargs.get("num_pts", 1000)
@@ -147,15 +150,6 @@ class MCParams:
         # of our model range
         fcorr_SFR_fracs = np.zeros(shape=num_pts)
         
-        #minZ, maxZ = metallicities[0], metallicities[-1]
-        #test_logZ = np.linspace(-10, 0, 1000)
-        #low_pt = np.argmin(np.abs(test_logZ - minZ))
-        #hi_pt = np.argmin(np.abs(test_logZ - maxZ))
-        #for i in range(num_pts):
-        #    total_SFR_pdf = norm.pdf(test_logZ, loc=np.log10(mean_metallicity_at_z[i]), scale=logZ_sigma_for_SFR)
-        #    total_SFR_pdf = total_SFR_pdf/np.sum(total_SFR_pdf) # normalize
-        #    fcorr_SFR_fracs[i] = np.sum(total_SFR_pdf[low_pt:hi_pt])
-        
         # create our object and return
         params = cls(
             cosmology=cosmo,
@@ -170,236 +164,211 @@ class MCParams:
         )
         return params
     
-    def calc_merger_rates_dz(self, zbins: int | NDArray, local_z: float = 0.1) -> tuple:
-        '''
-        Calculate DCO merger rates for the sample following Dominik et al. 2013 Eq. 16. 
-        ### Parameters:
-        - zbins: int | NDArray
-        - local_z: float = 0.1
-        ### Returns:
-        - tuple - local Rate, local bbh rate, local bhns rate, local bns rate, raw data
-        '''
-        if (isinstance(zbins, np.ndarray)):
-            if (zbins < 0).any():
-                raise ValueError('Redshift must be positive!')
-            elif (np.diff(zbins) < 0).any():
-                zbins = zbins[::-1]
-                if (np.diff(zbins) < 0).any():
-                    raise ValueError('Cannot coerce `zbins` to be monotonically increasing...')
-            
-        if isinstance(zbins, int):
-            lgzmin = np.log10(self.redshift.min())
-            lgzmax = np.log10(self.redshift.max())
-            zbins: NDArray = np.logspace(lgzmin.value, lgzmax.value, zbins)
+    # trying once again
+    def calc_merger_rates(self,
+                          nbins: int = 200, z_local: float = 0.1,
+                          **kwargs) -> \
+                              tuple[Quantity, Quantity, Quantity, Quantity, pd.DataFrame]:
+        '''Calculate dco merger rates per Dominik+2013.'''
+        primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
+        secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
+        Zlims: tuple | None = kwargs.get("Zlims", None)
         
+        mass_filter_pri: bool = False
+        mass_filter_sec: bool = False
+        Z_filter: bool = False
+        
+        if primary_mass_lims is not None:
+            mass_filter_pri = True
+            m_pri_min: float = primary_mass_lims[0]
+            m_pri_max: float = primary_mass_lims[1]
+        if secondary_mass_lims is not None:
+            mass_filter_sec = True
+            m_sec_min: float = secondary_mass_lims[0]
+            m_sec_max: float = secondary_mass_lims[1]
+        if Zlims is not None:
+            Z_filter = True
+            Z_min: float = Zlims[0]
+            Z_max: float = Zlims[1]
+        
+        n: int = nbins
+        n_j: int = len(self.bins)
         cosmo: Cosmology = self.cosmology
-        n: int = zbins.shape[0] - 1
+
+        t_i: Quantity = self.comoving_time[0]
+        t_f: Quantity = self.comoving_time[-1]
+        time_bin_edges: NDArray = np.linspace(t_i, t_f, n + 1).to(u.Myr)
+        z_at_edges: NDArray = z_at_value(cosmo.age, time_bin_edges)
+        time_bin_centers: NDArray = np.zeros(shape=n) * u.Myr
+        for i in range(n):
+            time_bin_centers[i] = np.mean(time_bin_edges[i:i+2])
+        z_at_centers: NDArray = z_at_value(cosmo.age, time_bin_centers)
+        E_z_at_centers: NDArray = cosmo.efunc(z_at_centers)
         
-        VOLRATE = u.yr ** -1 * u.Gpc ** -3 # unit
+        fracSFR_at_bin_centers: NDArray = \
+            np.zeros(shape=(n_j, n), dtype=float) * (u.Msun * u.yr ** -1 * u.Mpc ** -3)
+        for j in range(n_j):
+            fracSFR_at_bin_centers[j,:] = \
+                np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
         
         data: dict[str:NDArray] = {
-            "z_i": np.zeros(shape=n),
-            "z_f": np.zeros(shape=n),
-            "z_center": np.zeros(shape=n),
-            "t_center": np.zeros(shape=n) * u.Myr,
-            "E_z": np.zeros(shape=n),
-            "R_bbh": np.zeros(shape=n) * VOLRATE,
-            "R_bhns": np.zeros(shape=n) * VOLRATE,
-            "R_bns": np.zeros(shape=n) * VOLRATE,
-            "R_tot": np.zeros(shape=n) * VOLRATE
+            "t_center": time_bin_centers.to(u.Myr),
+            "t_i": time_bin_edges[:-1].to(u.Myr),
+            "t_f": time_bin_edges[1:].to(u.Myr),
+            "z_center": z_at_centers,
+            "z_i": z_at_edges[:-1],
+            "z_f": z_at_edges[1:],
+            "E_z": E_z_at_centers,
+            "R_bbh": np.zeros(shape=n) * self.VOLRATE,
+            "R_bhns": np.zeros(shape=n) * self.VOLRATE,
+            "R_bns": np.zeros(shape=n) * self.VOLRATE,
+            "R_total": np.zeros(shape=n) * self.VOLRATE,
+            "R_i_bbh": np.zeros(shape=n) * self.VOLRATE,
+            "R_i_bhns": np.zeros(shape=n) * self.VOLRATE,
+            "R_i_bns": np.zeros(shape=n) * self.VOLRATE,
+            "R_i_total": np.zeros(shape=n) * self.VOLRATE
         }
         
-        for i in range(n):
-            z_i = zbins[i]
-            z_f = zbins[i+1]
-            dz = np.abs(z_f-z_i)
-            z_center: float = np.mean(zbins[i:i+2])
-            t_center: Quantity = cosmo.age(z_center).to(u.Myr)
-        
-            # dimensionless Hubble parameter
-            E_z: float = np.sqrt(cosmo._Onu0*(1+z_center)**4 + \
-                cosmo._Om0*(1+z_center)**3 + cosmo._Ok0*(1+z_center)**2 + cosmo._Ode0)
-
-            R_bbh = 0 * VOLRATE
-            R_bns = 0 * VOLRATE
-            R_bhns = 0 * VOLRATE
-
+        for i, t_center in enumerate(tqdm(time_bin_centers, desc="Comoving time bins", unit="bins")):
+            
+            t_i = time_bin_edges[i]
+            t_f = time_bin_edges[i+1]
+            z_center: float = z_at_centers[i]
+            z_i = z_at_edges[i]
+            z_f = z_at_edges[i+1]
+            dz = np.abs(z_i - z_f)
+            E_z = E_z_at_centers[i]
+            
+            R_i_total = 0.0 * self.VOLRATE
+            R_i_bbh = 0.0 * self.VOLRATE
+            R_i_bhns = 0.0 * self.VOLRATE
+            R_i_bns = 0.0 * self.VOLRATE
+            
             for j, Zbin in enumerate(self.bins):
                 
+                if Z_filter:
+                    if (Zbin.metallicity > Z_max) or (Zbin.metallicity < Z_min):
+                        continue
+                
+                #met: float = Zbin.metallicity
+                binfrac: float = Zbin.binfrac_model
+                Msim: float = Zbin.simulated_mass
                 f_corr: float = Zbin.imf_f_corr
-                Msim: Quantity = Zbin.simulated_mass
-
-                systems: pd.DataFrame = Zbin.mergers[Zbin.mergers.t_delay < t_center.value + self.comoving_time.min().value]
-                bbh_systems: NDArray = (systems.kstar_1 == 14) & (systems.kstar_2 == 14)
-                bns_systems: NDArray = (systems.kstar_1 == 13) & (systems.kstar_2 == 13)
-                bhns_systems: NDArray = ((systems.kstar_1 == 13) & (systems.kstar_2 == 14))\
-                    | ((systems.kstar_1 == 14) & (systems.kstar_2 == 13))
-                t_form: NDArray = t_center - (systems.t_delay.values * u.Myr)
-                frac_SFR_per_sys: NDArray = np.interp(
-                    t_form, self.comoving_time, self.fractional_SFR_at_met[j,:]).to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
                 
-                Rate_per_sys: NDArray = \
-                    (f_corr * (frac_SFR_per_sys/Msim) * dz/((1+z_center) * E_z)).to(VOLRATE)
+                systems: pd.DataFrame = Zbin.mergers[Zbin.mergers.t_delay.values * u.Myr < t_center]
                 
-                R_bbh += Rate_per_sys[bbh_systems].sum()
-                R_bns += Rate_per_sys[bns_systems].sum()
-                R_bhns += Rate_per_sys[bhns_systems].sum()
-
-            data["z_i"][i] = z_i
-            data["z_f"][i] = z_f
-            data["z_center"][i] = z_center
-            data["t_center"][i] = t_center
-            data["E_z"][i] = E_z
-            data["R_bbh"][i] = R_bbh
-            data["R_bhns"][i] = R_bhns
-            data["R_bns"][i] = R_bns
-            data["R_tot"][i] = R_bbh + R_bhns + R_bns
-            
-        calc_R_local = lambda x: ((1/(cosmo._H0 * cosmo.lookback_time(local_z))) * x.sum()).to(VOLRATE)
-        
-        R_local_tot = calc_R_local(data["R_tot"][data["z_center"] <= local_z])
-        R_local_bbh = calc_R_local(data["R_bbh"][data["z_center"] <= local_z])
-        R_local_bhns = calc_R_local(data["R_bhns"][data["z_center"] <= local_z])
-        R_local_bns = calc_R_local(data["R_bns"][data["z_center"] <= local_z])
-        
-        return R_local_tot, R_local_bbh, R_local_bhns, R_local_bns, data
-
-
-    def calc_MC_rates(self: MCParams,
-                    n: int = 100, seed: int = 0, **kwargs) -> pd.DataFrame:
-        '''
-        Calculate rates by taking a monte-carlo sum with binaries from `sampler`.
-        ### Parameters:
-        - n: int - the number of monte-carlo samples to draw from each system
-        - seed: int - the pseudorandom seed 
-        #### Kwargs:
-        - dt: Quantity - the time interval to determine comoving time bins
-        - detectability_function: function - the function accounting for detector effects
-        ### Returns:
-        - DataFrame - a dataframe of MC samples, weights, and detectability
-        '''
-        bins: list[Model] = self.bins
-        
-        dt: Quantity = kwargs.get("dt", 100 * u.Myr)
-        detectability_function: function = kwargs.get("detectability_function", trivial_Pdet)
-        time_bins: NDArray = np.arange(self.comoving_time[0].value, self.comoving_time[-1].value, dt.value)
-        
-        dicts = []
-        
-        for j_Z, m in enumerate(bins):
-            metallicity: float = m.metallicity
-            mergers: pd.DataFrame = m.mergers
-            n_k: int = mergers.index.shape[0]
-            
-            # trying with weighted SFR
-            fracSFR_pdf_at_met = self.weighted_SFR[j_Z,:]
-            
-            # get system statistics
-            bin_num = mergers.bin_num.values
-            mass_1 = mergers.mass_1.values
-            mass_2 = mergers.mass_2.values
-            kstar_1 = mergers.kstar_1.values
-            kstar_2 = mergers.kstar_2.values
-            t_delay = mergers.t_delay.values
-            
-            # sample formation times with ITM
-            harvest = self._inverse_transform_sample(
-                (n_k, n), fracSFR_pdf_at_met, self.comoving_time, seed)
-            
-            t_max = self.comoving_time.max().to(u.Myr).value
-            sample_list = np.array([], dtype=float)
-            num_valid_samples = np.zeros(n_k, dtype=np.int64)
-            
-            num_valid_samples = np.ones(n_k, dtype=np.int64) * n
-            sample_list = np.reshape(harvest, n_k*n)
+                if (mass_filter_pri or mass_filter_sec):
+                    component_masses = systems[["mass_1", "mass_2"]].to_numpy()
+                    primary_mass = component_masses.max(axis=1)
+                    secondary_mass = component_masses.min(axis=1)
+                    
+                    if (mass_filter_pri and mass_filter_sec):
+                        mass_filter = (primary_mass >= m_pri_min) & (primary_mass < m_pri_max) &\
+                            (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
+                    elif (mass_filter_pri):
+                        mass_filter = (primary_mass >= m_pri_min) & (primary_mass < m_pri_max)
+                    elif (mass_filter_sec):
+                        mass_filter = (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
+                    else:
+                        raise ValueError()
+                    systems = systems[mass_filter]
                 
-            columns = {
-                "bin_num": np.repeat(bin_num, num_valid_samples),
-                "metallicity": np.ones(sample_list.shape[0], dtype=float) * metallicity,
-                "mass_1": np.repeat(mass_1, num_valid_samples),
-                "mass_2": np.repeat(mass_2, num_valid_samples),
-                "kstar_1": np.repeat(kstar_1, num_valid_samples),
-                "kstar_2": np.repeat(kstar_2, num_valid_samples),
-                "t_delay": np.repeat(t_delay, num_valid_samples),
-                "t_form": sample_list,
-                "z_form": np.interp(sample_list, self.comoving_time.value, self.redshift),
-                "t_merge": sample_list + np.repeat(t_delay, num_valid_samples),
-                "z_merge": np.interp(sample_list+np.repeat(t_delay, num_valid_samples), self.comoving_time.value, self.redshift, right=np.nan),
-                }
-            
-            columns["P_det"] = detectability_function(columns)
-            columns["Rate"] = self._calc_intrinsic_rates(j_Z, columns, n, dt, time_bins)
-            
-            dicts.append(columns)
-            
-        final_data = {a:None for a in dicts[0].keys()}
-        for di in dicts:
-            for k, v in di.items():
-                if final_data[k] is None:
-                    final_data[k] = v
-                else:
-                    final_data[k] = np.append(final_data[k], v)
-        
-        output = pd.DataFrame(final_data)
-        return output
+                t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
+                # get system type for each dco
+                bbh, bhns, bns = self.dco_kstar_filter(systems)
+                
+                # get time bin in which each merging system formed
+                SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
+                frac_SFR_at_t_form: NDArray = fracSFR_at_bin_centers[j,SFR_bins_for_systems]
+                #E_z_at_t_form: NDArray = E_z_at_centers[SFR_bins_for_systems]
+                
+                # calculate the rate -- see Dominik et al 2013 Eq. 16/17
+                Rates_intrinsic: NDArray = (\
+                    (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
+                
+                R_i_total += Rates_intrinsic.sum()
+                R_i_bbh += Rates_intrinsic[bbh].sum()
+                R_i_bhns += Rates_intrinsic[bhns].sum()
+                R_i_bns += Rates_intrinsic[bns].sum()
+                
+            # append data to output dict
+            dzdt: float = dz * (((1 + z_center) * E_z) ** -1)
+            data["R_i_total"][i] = R_i_total
+            data["R_i_bbh"][i] = R_i_bbh
+            data["R_i_bhns"][i] = R_i_bhns
+            data["R_i_bns"][i] = R_i_bns
+            data["R_total"][i] = R_i_total * dzdt
+            data["R_bbh"][i] = R_i_bbh * dzdt
+            data["R_bhns"][i] = R_i_bhns * dzdt
+            data["R_bns"][i] = R_i_bns * dzdt
 
-    def _calc_intrinsic_rates(self: MCParams,
-                    j_Z: int, data: dict[str:NDArray], num_draws: int, dt: Quantity, time_bins: NDArray) -> NDArray:
-        '''
-        We estimate intrinsic merger rates by binning our sampled events by merger time and multiplying by
-        the star formation history SFH(z,Z) and population correction factors.
-        For an explanation of the SFH see Bavera et al. 2020.
-        '''
-        dt = dt.to(u.Myr)
-        i_t: int = time_bins.shape[0] - 1
-        output = np.zeros(data["t_form"].shape[0]) * (u.yr ** -1 * u.Gpc ** -3)
-        
-        for i in range(i_t):
-            t0, t1 = time_bins[i], time_bins[i+1]
-            idx = (data["t_merge"] >= t0) & (data["t_merge"] < t1)
-            
-            z_form = data["z_form"][idx]
-            
-            # star formation history
-            SFR_at_z: NDArray =  np.interp(z_form, self.redshift[::-1], self.SFR_at_z[::-1]) # TODO
-            met_frac_at_z: float = np.interp(z_form, self.redshift[::-1], self.fractional_SFR_at_met[j_Z,:][::-1]) # TODO
-            SFH_jz = (SFR_at_z * met_frac_at_z).to(u.Msun * u.yr ** -1 * u.Gpc ** -3)
-            fcorr_SFR_fracs = np.interp(z_form, self.redshift[::-1], self.fcorr_SFR_fracs[::-1]) # TODO
-            
-            # intrinsic merger rate -- see Dominik+13 eq. 16             
-            rate = self.bins[j_Z].imf_f_corr * (1/num_draws) * fcorr_SFR_fracs *\
-                SFH_jz * (self.bins[j_Z].total_star_mass ** -1)# * \
-                            
-            rate = rate.to(u.yr ** -1 * u.Gpc ** -3)
-            output[idx] = rate
-        
-        return output
+        output_df: pd.DataFrame = pd.DataFrame(data)
+        R_total_local: Quantity = data["R_total"][z_center < z_local].sum()
+        R_bbh_local: Quantity = data["R_bbh"][z_center < z_local].sum()
+        R_bhns_local: Quantity = data["R_bhns"][z_center < z_local].sum()
+        R_bns_local: Quantity = data["R_bns"][z_center < z_local].sum()
+
+        return R_total_local, R_bbh_local, R_bhns_local, R_bns_local, output_df
     
     @staticmethod
-    def _inverse_transform_sample(shape: tuple[int,int],
-                                fracSFR_pdf_at_met: NDArray, comoving_time: NDArray, seed: int = 0) -> NDArray:
-        '''
-        Use inverse transform sampling to sample continuously in time.
-        Specifically, this sampler accepts a metallicity bin and calculates the CDF of stars of that
-        metallicity forming across cosmic time; it then draws a sample of formation times for stars of that
-        particular metallicity.
-        **NOTE:** This does not account for the absolute SFR at a given time, only the metallicity distribution! 
-        ### Parameters:
-        - shape: tuple[int, int] - the shape of the sample to draw
-        - j_Z: int - the index of the metallicity at which to sample
-        - fracSFR_pdf_at_met: NDArray - the fractional SFR at metallicity j_Z over time
-        - comoving_time: the comoving time values over which to interpolate
-        - seed: int - the pseudorandom seed
-        ### Returns:
-        - NDArray - the pseudorandom sample
-        '''
-        Z_pdf = fracSFR_pdf_at_met
-        norm_pdf = (Z_pdf / np.sum(Z_pdf)) # normalize
-        cdf = np.cumsum(norm_pdf)
-        #print(cdf[-1])
-
-        gen = np.random.default_rng(seed=seed)
-        choices = gen.random(size=shape)
-        harvest = np.interp(choices, cdf, comoving_time.value)
+    def _get_bins_from_time(t: NDArray | Quantity, time_bins: NDArray) -> NDArray | Quantity:
+        '''Return the index of the closest calculated time point from time values.'''
+        diffs = np.abs(t[:,np.newaxis] - time_bins)
+        return np.argmin(diffs, axis=1)
         
-        return harvest
+        #indices: NDArray = np.zeros(shape=t.shape[0], dtype=int)
+        #for k in range(t.shape[0]):
+        #    indices[k] = np.argmin(np.abs(t[k] - time_bins))
+        #
+        #return indices
+    
+    @staticmethod
+    def dco_kstar_filter(s: pd.DataFrame) -> tuple[NDArray, NDArray, NDArray]:
+
+        bbh = (s.kstar_1 == 14) & (s.kstar_2 == 14)
+        bhns = ((s.kstar_1 == 13) & (s.kstar_2 == 14)) | ((s.kstar_1 == 14) & (s.kstar_2 == 13))
+        bns = (s.kstar_1 == 13) & (s.kstar_2 == 13)
+        
+        return bbh, bhns, bns 
+    
+    @staticmethod
+    def calc_Zpdf(Z_values: NDArray,
+                meanZ: NDArray, sigma_logZ: float, num_pts: int) -> tuple[NDArray, NDArray]:
+        '''Use an integrated log-normal metallicity PDF to estimate the fractional SFR for each metallicity bin.'''
+        Zrange = np.linspace(1e-10, 0.2, num_pts)
+        rawZpdf = np.zeros(shape=(num_pts, num_pts), dtype=float)
+        Zcdf = rawZpdf.copy()
+        
+        for i in range(num_pts):
+            _pdf = norm.pdf(x=np.log10(Zrange), loc=np.log10(meanZ[i]), scale=sigma_logZ)
+            rawZpdf[:,i] = _pdf/_pdf.sum()
+            _cdf = np.cumsum(rawZpdf[:,i])
+            Zcdf[:,i] = _cdf
+        
+        # set edges of Zbins
+        Zbin_edges: NDArray = np.zeros(shape=len(Z_values)+1)
+        for j, jZ  in enumerate(Z_values):
+            if j == 0:
+                print("aaa!")
+                Zbin_edges[j+1] = np.mean(Z_values[j:j+2])
+                Zbin_edges[j] = jZ - (Zbin_edges[j+1] - jZ)
+            elif i == len(Z_values) - 1:
+                Zbin_edges[j] = np.mean(Z_values[j-1:j+1])
+                Zbin_edges[j+1] = jZ + (Zbin_edges[j] - jZ)
+            else:
+                Zbin_edges[j] = np.mean(Zbin_edges[j-1:j+1])
+                Zbin_edges[j+1] = np.mean(Zbin_edges[j:j+2])
+        
+        # calculate fSFR for each bin at each time value
+        fSFR_at_z: NDArray = np.zeros(shape=(len(Z_values), num_pts))
+        for j, jZ in enumerate(Z_values):
+            Z_lo = Zbin_edges[j]
+            Z_hi = Zbin_edges[j+1]
+            
+            for k in range(num_pts):
+                Pvals = np.interp([Z_lo, Z_hi], Zrange, Zcdf[:,k])
+                P_tz: float = np.abs(np.diff(Pvals))
+                fSFR_at_z[j,k] = P_tz
+
+        return Zcdf, Zbin_edges, fSFR_at_z
+    
