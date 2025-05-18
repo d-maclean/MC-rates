@@ -9,7 +9,7 @@ from astropy.units import Quantity
 
 # Madau & Fragos (2017)
 
-def calc_mean_metallicity_madau_fragos(redshift: float | NDArray) -> float | NDArray:
+def calc_mean_metallicity_madau_fragos(redshift: float | NDArray, Zsun: float = 0.02) -> float | NDArray:
     '''
     Get cosmic gas-phase metallicity means and functions using the best-fit function per Madau & Fragos 2017.
     ### Parameters:
@@ -17,7 +17,7 @@ def calc_mean_metallicity_madau_fragos(redshift: float | NDArray) -> float | NDA
     ### Returns:
     - mean_Z: average absolute metallicity [0<Z<1]
     '''
-    return np.power(10, (0.153 - 0.074 * redshift ** 1.34 )) * 0.02
+    return np.power(10, (0.153 - 0.074 * redshift ** 1.34 )) * Zsun
 
 
 def calc_SFR_madau_fragos(redshift: float | NDArray) -> Quantity | NDArray:
@@ -51,10 +51,11 @@ def process_cosmic_models(bpp: pd.DataFrame) -> pd.DataFrame:
     ecc_range, ecc_integral = calculate_ecc_integral(1000)
     
     bhns = get_bhns_systems(bpp)
-    t_gw = calculate_gw_timescale(bhns, ecc_range, ecc_integral)
+    t_gw_sec = calculate_gw_timescale(bhns, ecc_range, ecc_integral)
+    t_gw = (t_gw_sec * u.s).to(u.Myr)
     
-    t_delay = bhns.tphys + t_gw
-    data = {"t_gw": t_gw, "t_delay": t_delay}
+    t_delay = bhns.tphys + t_gw.value)
+    data = {"t_gw": t_gw.value, "t_delay": t_delay}
     bhns.assign(data)
     
     return bhns
