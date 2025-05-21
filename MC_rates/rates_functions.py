@@ -1,10 +1,10 @@
 import numpy as np
 from astropy import units as u, constants as const
 import pandas as pd
-from scipy.stats import norm
+from scipy.stats import norm, truncnorm
 from scipy.integrate import quad
 
-from numpy.typing import NDArray
+from numpy.typing import NDArray, ArrayLike
 from astropy.units import Quantity
 
 # Madau & Fragos (2017)
@@ -36,6 +36,113 @@ def calc_SFR_madau_fragos(redshift: float | NDArray) -> Quantity | NDArray:
 
     return psi_z
 
+def calc_truncnorm_fractional_SFR(Zbins: ArrayLike,
+                                  meanZ: ArrayLike, redshift: ArrayLike, 
+                                  SFR_at_redshift: ArrayLike, sigma_logZ: float = 0.5) -> NDArray:
+    '''
+    Use a truncated log-normal distribution to calculate fractional SFR at each metallicity;
+    notably, this method does not 'dump' SF outside the provided Zbins into the edges; instead,
+    it rescales the bins to add up to 1.
+    '''
+    l_i: int = len(redshift)
+    l_j: int = len(Zbins)
+    lgZbins = np.log10(Zbins)
+    
+    # test PDFs
+    Zpdf: NDArray = np.zeros(shape=(1000, l_i))
+    test_range: NDArray = np.logspace(-8, 0, 1000)
+    a_arr, b_arr = (lgZbins.min() - np.log10(meanZ)) / sigma_logZ,\
+        (lgZbins.max() - np.log10(meanZ)) / sigma_logZ
+    for i in range(l_i):
+        _pdf = truncnorm.pdf(
+            x=np.log10(test_range),
+            a=a_arr[i],
+            b=b_arr[i],
+            loc=np.log10(meanZ[i]),
+            scale=sigma_logZ
+            )
+        Zpdf[:,i] = _pdf / _pdf.sum()
+    
+    # calc Zbin edges
+    Zbin_edges: NDArray = np.zeros(shape=l_j+1, dtype=float)
+    for j in range(l_j):
+        if j == 0:
+            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
+            Zbin_edges[j] = Zbins[j]
+        elif j == l_j - 1:
+            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
+            Zbin_edges[j+1] = Zbins[j]
+        else:
+            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
+            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
+    
+    # calc truncated pdf
+    Zfracs: NDArray = np.zeros(shape=(l_j, l_i), dtype=float)
+    for i in range(l_i):
+        cdf = np.cumsum(Zpdf[:,i])
+        fracs = np.zeros(shape=l_j)
+        for j in range(l_j):
+            area_below_edges = np.interp(Zbin_edges[j:j+2], test_range, cdf)
+            fracs[j] = area_below_edges.max() - area_below_edges.min()
+        Zfracs[:,i] = fracs
+    
+    # multiply result by SFR(z)
+    fracSFR = Zfracs * SFR_at_redshift
+    
+    return fracSFR
+
+
+def calc_lognorm_fractional_SFR(Zbins: NDArray,
+                            meanZ: NDArray, redshift: NDArray, 
+                            SFR_at_redshift: NDArray, sigma_logZ: float = 0.5) -> NDArray:
+    '''
+    Use a log-normal SFR to calculate fractional SFR for each metallicity bin at each redshift/time
+    value.
+    '''
+    l_i: int = len(redshift)
+    l_j: int = len(Zbins)
+    
+    # test PDF over all metallicities
+    Z_test_range: NDArray = np.logspace(-10, 0, 1000)
+    Zpdf: NDArray = np.zeros(shape=(1000, l_i))
+    for i in range(l_i):
+        _pdf = norm.pdf(
+            x=np.log10(Z_test_range),
+            loc=np.log10(meanZ[i]),
+            scale=sigma_logZ
+            )
+        Zpdf[:,i] = _pdf / _pdf.sum()
+
+    # calc Zbin edges
+    Zbin_edges: NDArray = np.zeros(shape=l_j+1, dtype=float)
+    for j in range(l_j):
+        if j == 0:
+            Zbin_edges[j] = 0e0
+            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
+
+        elif j == l_j - 1:
+            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
+            Zbin_edges[j+1] = 1e0
+
+        else:
+            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
+            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
+            
+    # get area under Zbin edges
+    Zfracs: NDArray = np.zeros(shape=(l_j, l_i), dtype=float)
+    for i in range(l_i):
+        cdf: NDArray = np.cumsum(Zpdf[:,i])
+        fracs = np.zeros(shape=l_j)
+        for j in range(l_j):
+            area_below_edges = np.interp(Zbin_edges[j:j+2], Z_test_range, cdf)
+            fracs[j] = area_below_edges.max() - area_below_edges.min()
+        Zfracs[:,i] = fracs
+        
+    # multiply result by SFR(z)
+    fracSFR = Zfracs * SFR_at_redshift
+    
+    return fracSFR
+
 
 def trivial_Pdet(data: dict) -> NDArray:
     '''Returns ones; for calculating intrinsic rates.'''
@@ -54,7 +161,7 @@ def process_cosmic_models(bpp: pd.DataFrame) -> pd.DataFrame:
     t_gw_sec = calculate_gw_timescale(bhns, ecc_range, ecc_integral)
     t_gw = (t_gw_sec * u.s).to(u.Myr)
     
-    t_delay = bhns.tphys + t_gw.value)
+    t_delay = bhns.tphys + t_gw.value
     data = {"t_gw": t_gw.value, "t_delay": t_delay}
     bhns.assign(data)
     

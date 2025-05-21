@@ -15,7 +15,8 @@ from astropy.units import Quantity
 from typing import ClassVar
 
 from rates_functions import calc_mean_metallicity_madau_fragos,\
-    calc_SFR_madau_fragos, trivial_Pdet, process_cosmic_models
+    calc_SFR_madau_fragos, calc_lognorm_fractional_SFR,\
+        calc_truncnorm_fractional_SFR, process_cosmic_models
 
 
 @dataclass
@@ -123,6 +124,7 @@ class MCRates:
         num_pts: int = kwargs.get("num_pts", 1000)
         sfr_function: function = kwargs.get("SFR_function", calc_SFR_madau_fragos)
         avg_met_function: function = kwargs.get("avg_met_function", calc_mean_metallicity_madau_fragos)
+        Zfracs_method: str = kwargs.get("Zfracs_method", "lognorm")
         logZ_sigma_for_SFR: float = kwargs.get("logZ_sigma", 0.5)
         
         comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
@@ -137,18 +139,24 @@ class MCRates:
         SFR_at_z = sfr_function(redshift).to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
         mean_metallicity_at_z = avg_met_function(redshift)
         
-        # use a lognormal PDF to estimate the fraction of each metallicity bin forming at each time point
-        fracSFR = np.zeros(shape=(l_j, num_pts), dtype=float) * (u.Msun * u.yr ** -1 * u.Mpc ** -3)
-        for i in range(num_pts):
-            log_avgZ = np.log10(mean_metallicity_at_z[i])
-            Z_pdf = norm.pdf(x=np.log10(metallicities), loc=log_avgZ, scale=0.5)
-            Z_pdf /= Z_pdf.sum()
-            fracSFR[:,i] = SFR_at_z[i] * Z_pdf
-            
-        # calculate fcorr_SFR_fracs for missing metallicity
-        # this suggested by Mike to avoid over-modeling mass outside
-        # of our model range
-        fcorr_SFR_fracs = np.zeros(shape=num_pts)
+        modeled_SFR_fracs = np.ones(shape=num_pts)
+        
+        if Zfracs_method == "lognorm":
+            fracSFR = calc_lognorm_fractional_SFR(
+                Zbins = metallicities,
+                meanZ = mean_metallicity_at_z,
+                redshift = redshift, 
+                SFR_at_redshift = SFR_at_z,
+                sigma_logZ = logZ_sigma_for_SFR
+                )
+        elif Zfracs_method == "truncnorm":
+            fracSFR = calc_truncnorm_fractional_SFR(
+                Zbins = metallicities,
+                meanZ = mean_metallicity_at_z,
+                redshift = redshift, 
+                SFR_at_redshift = SFR_at_z,
+                sigma_logZ = logZ_sigma_for_SFR
+                )
         
         # create our object and return
         params = cls(
@@ -160,7 +168,7 @@ class MCRates:
             bins=bins_list,
             mean_met_at_z=mean_metallicity_at_z,
             fractional_SFR_at_met=fracSFR,
-            fcorr_SFR_fracs=fcorr_SFR_fracs
+            fcorr_SFR_fracs=modeled_SFR_fracs
         )
         return params
     
@@ -173,6 +181,12 @@ class MCRates:
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
+        use_Zfracs_correction: bool = kwargs.get("use_Zfracs_corr", False)
+        
+        if use_Zfracs_correction:
+            Zfracs_corr = self.fcorr_SFR_fracs
+        else:
+            Zfracs_corr = np.ones(shape=self.comoving_time.shape[0])
         
         mass_filter_pri: bool = False
         mass_filter_sec: bool = False
@@ -280,11 +294,11 @@ class MCRates:
                 # get time bin in which each merging system formed
                 SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
                 frac_SFR_at_t_form: NDArray = fracSFR_at_bin_centers[j,SFR_bins_for_systems]
-                #E_z_at_t_form: NDArray = E_z_at_centers[SFR_bins_for_systems]
+                Zfracs_corr_at_t_form: NDArray = Zfracs_corr[SFR_bins_for_systems]
                 
                 # calculate the rate -- see Dominik et al 2013 Eq. 16/17
                 Rates_intrinsic: NDArray = (\
-                    (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
+                    (binfrac * f_corr) * (1/Zfracs_corr_at_t_form) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
                 
                 R_i_total += Rates_intrinsic.sum()
                 R_i_bbh += Rates_intrinsic[bbh].sum()
