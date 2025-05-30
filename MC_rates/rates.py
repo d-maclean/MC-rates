@@ -124,7 +124,7 @@ class MCRates:
         num_pts: int = kwargs.get("num_pts", 1000)
         sfr_function: function = kwargs.get("SFR_function", calc_SFR_madau_fragos)
         avg_met_function: function = kwargs.get("avg_met_function", calc_mean_metallicity_madau_fragos)
-        Zfracs_method: str = kwargs.get("Zfracs_method", "lognorm")
+        Zfracs_method: str = kwargs.get("Zfracs_method", "truncnorm")
         logZ_sigma_for_SFR: float = kwargs.get("logZ_sigma", 0.5)
         
         comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
@@ -175,13 +175,14 @@ class MCRates:
     # trying once again
     def calc_merger_rates(self,
                           nbins: int = 200, z_local: float = 0.1,
-                          **kwargs) -> \
-                              tuple[Quantity, Quantity, Quantity, Quantity, pd.DataFrame]:
+                          **kwargs) -> dict[str:Quantity | pd.DataFrame]:
         '''Calculate dco merger rates per Dominik+2013.'''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
         use_Zfracs_correction: bool = kwargs.get("use_Zfracs_corr", False)
+        pessimistic_ce: bool = kwargs.get("pessimistic_ce", False)
+        rigorous_SFR: bool = kwargs.get("rigorous_SFR", True)
         
         if use_Zfracs_correction:
             Zfracs_corr = self.fcorr_SFR_fracs
@@ -269,7 +270,12 @@ class MCRates:
                 Msim: float = Zbin.simulated_mass
                 f_corr: float = Zbin.imf_f_corr
                 
-                systems: pd.DataFrame = Zbin.mergers[Zbin.mergers.t_delay.values * u.Myr < t_center]
+                t_delay_filter = \
+                    (Zbin.mergers.t_delay.values < \
+                    (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
+                systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
+                if pessimistic_ce:
+                    systems = systems.loc[~systems.merge_in_ce]
                 
                 if (mass_filter_pri or mass_filter_sec):
                     component_masses = systems[["mass_1", "mass_2"]].to_numpy()
@@ -292,7 +298,12 @@ class MCRates:
                 bbh, bhns, bns = self.dco_kstar_filter(systems)
                 
                 # get time bin in which each merging system formed
-                SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
+                if rigorous_SFR:
+                    SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
+                else:
+                    SFR_bins_for_systems: NDArray = self._get_bins_from_time(time_bin_centers[i:i+1], time_bin_centers)
+                    SFR_bins_for_systems = SFR_bins_for_systems.repeat(len(t_form))
+                    
                 frac_SFR_at_t_form: NDArray = fracSFR_at_bin_centers[j,SFR_bins_for_systems]
                 Zfracs_corr_at_t_form: NDArray = Zfracs_corr[SFR_bins_for_systems]
                 
@@ -327,6 +338,8 @@ class MCRates:
     @staticmethod
     def _get_bins_from_time(t: NDArray | Quantity, time_bins: NDArray) -> NDArray | Quantity:
         '''Return the index of the closest calculated time point from time values.'''
+        if not isinstance(t, np.ndarray):
+            t = np.asarray([t.to(u.Myr).value]) * u.Myr
         diffs = np.abs(t[:,np.newaxis] - time_bins)
         return np.argmin(diffs, axis=1)
         
