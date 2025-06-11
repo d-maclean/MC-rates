@@ -91,6 +91,32 @@ def calc_truncnorm_fractional_SFR(Zbins: ArrayLike,
     
     return fracSFR
 
+def calc_adjusted_mean_for_truncnorm(desired_mean_Z: NDArray, Zmin: float, Zmax: float, sigma: float) -> NDArray:
+    '''
+    Returns an array of `adjusted` means for desired mean metalicities `desired_mean_Z`. This is necessary to correct
+    for the skew of a truncated log-normal metallicity distribution.
+    
+    ### Parameters:
+    - `desired_mean_Z`: NDArray - the `proper` mean metallicities
+    - `Zmin`: float - the minimum bin value
+    - `Zmax`: float - the maximum bin value
+    - `sigma`: float - the log-standard deviation of the log-normal distribution
+    ### Returns:
+    - NDArray - the "adjusted" absolute metallicity values to use for your truncated log-normal pdf
+    '''
+    test_log_mu: NDArray = np.log10(np.logspace(-10, 0, 1000))
+    fake_log_mu: NDArray = np.zeros(shape=1000)
+    log_Zmin, log_Zmax = np.log10(Zmin), np.log10(Zmax)
+    a, b = (log_Zmin - test_log_mu) / sigma, (log_Zmax - test_log_mu) / sigma
+
+    for j in range(1000):
+        output_log_mu = truncnorm.stats(a[j], b[j], loc=test_log_mu[j], scale=sigma, moments='m')
+        fake_log_mu[j] = output_log_mu
+    
+    means_to_pass = np.interp(np.log10(desired_mean_Z), test_log_mu, fake_log_mu)
+    
+    return 10 ** (means_to_pass)
+
 
 def calc_lognorm_fractional_SFR(Zbins: NDArray,
                             meanZ: NDArray, redshift: NDArray, 

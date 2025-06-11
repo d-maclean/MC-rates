@@ -16,7 +16,8 @@ from typing import ClassVar
 
 from rates_functions import calc_mean_metallicity_madau_fragos,\
     calc_SFR_madau_fragos, calc_lognorm_fractional_SFR,\
-        calc_truncnorm_fractional_SFR, process_cosmic_models
+    calc_truncnorm_fractional_SFR, process_cosmic_models,\
+    calc_adjusted_mean_for_truncnorm
 
 
 @dataclass
@@ -97,7 +98,7 @@ class MCRates:
     cosmology: Cosmology
     comoving_time: NDArray[u.Myr] # (num_pts,)
     redshift: NDArray
-    SFR_at_z: NDArray 
+    SFR_at_z: NDArray
     
     # metallicity and binaries
     metallicities: list[float]
@@ -105,17 +106,19 @@ class MCRates:
     mean_met_at_z: NDArray # (num_pts,)
     fractional_SFR_at_met: NDArray # shape (j, num_pts)
     fcorr_SFR_fracs: NDArray # shape (num_pts) -- for correcting unmodeled SFR
+    RATE: ClassVar[Quantity] =  u.yr ** -1
     VOLRATE: ClassVar[Quantity] = u.yr ** -1 * u.Gpc ** -3
 
     @classmethod
     def init_sampler(cls, t0: Quantity, tf: Quantity,
-                    filepaths_to_bins: list[str], **kwargs) -> MCRates:
+                    filepaths_to_models: list[str], model_type: str = "cosmic", **kwargs) -> MCRates:
         '''
         Create an MCRates instance with all the necessary information to
         draw samples and calculate rates.
         ### Parameters:
         - t0, tf: Quantity - earliest and latest comoving time values
-        - filepaths_to_bins: list[str] - the location at which to find models
+        - filepaths_to_models: list[str] - the locations of models
+        - model_type: str = "cosmic" - the type of model to use
         - **kwargs
         ### Returns:
         - MCRates
@@ -131,8 +134,7 @@ class MCRates:
         redshift = z_at_value(cosmo.age, comoving_time)
         
         # load binaries from COSMIC
-        bins_list = Model.load_cosmic_models(filepaths_to_bins, is_prefiltered=True)
-        l_j = len(bins_list)
+        bins_list = Model.load_cosmic_models(filepaths_to_models, is_prefiltered=True)
         metallicities = [x.metallicity for x in bins_list]
         
         # get Star Formation info
@@ -150,13 +152,19 @@ class MCRates:
                 sigma_logZ = logZ_sigma_for_SFR
                 )
         elif Zfracs_method == "truncnorm":
+            Zmin = min(metallicities)
+            Zmax = max(metallicities)
+            adjusted_truncnorm_means =\
+                calc_adjusted_mean_for_truncnorm(mean_metallicity_at_z, Zmin,  Zmax, logZ_sigma_for_SFR)
             fracSFR = calc_truncnorm_fractional_SFR(
                 Zbins = metallicities,
-                meanZ = mean_metallicity_at_z,
+                meanZ = adjusted_truncnorm_means, #mean_metallicity_at_z,
                 redshift = redshift, 
                 SFR_at_redshift = SFR_at_z,
                 sigma_logZ = logZ_sigma_for_SFR
                 )
+        #elif Zfracs_method == "corrected_truncnorm":
+            
         
         # create our object and return
         params = cls(
@@ -180,14 +188,7 @@ class MCRates:
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
-        use_Zfracs_correction: bool = kwargs.get("use_Zfracs_corr", False)
         pessimistic_ce: bool = kwargs.get("pessimistic_ce", False)
-        rigorous_SFR: bool = kwargs.get("rigorous_SFR", True)
-        
-        if use_Zfracs_correction:
-            Zfracs_corr = self.fcorr_SFR_fracs
-        else:
-            Zfracs_corr = np.ones(shape=self.comoving_time.shape[0])
         
         mass_filter_pri: bool = False
         mass_filter_sec: bool = False
@@ -226,6 +227,8 @@ class MCRates:
             fracSFR_at_bin_centers[j,:] = \
                 np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
         
+        rate_unit = self.RATE
+        
         data: dict[str:NDArray] = {
             "t_center": time_bin_centers.to(u.Myr),
             "t_i": time_bin_edges[:-1].to(u.Myr),
@@ -234,14 +237,14 @@ class MCRates:
             "z_i": z_at_edges[:-1],
             "z_f": z_at_edges[1:],
             "E_z": E_z_at_centers,
-            "R_bbh": np.zeros(shape=n) * self.VOLRATE,
-            "R_bhns": np.zeros(shape=n) * self.VOLRATE,
-            "R_bns": np.zeros(shape=n) * self.VOLRATE,
-            "R_total": np.zeros(shape=n) * self.VOLRATE,
-            "R_i_bbh": np.zeros(shape=n) * self.VOLRATE,
-            "R_i_bhns": np.zeros(shape=n) * self.VOLRATE,
-            "R_i_bns": np.zeros(shape=n) * self.VOLRATE,
-            "R_i_total": np.zeros(shape=n) * self.VOLRATE
+            "N_bbh": np.zeros(shape=n) * self.VOLRATE,
+            "N_bhns": np.zeros(shape=n) * self.VOLRATE,
+            "N_bns": np.zeros(shape=n) * self.VOLRATE,
+            "N_total": np.zeros(shape=n) * self.VOLRATE,
+            "R_bbh": np.zeros(shape=n) * rate_unit, #self.VOLRATE,
+            "R_bhns": np.zeros(shape=n) * rate_unit, #self.VOLRATE,
+            "R_bns": np.zeros(shape=n) * rate_unit, #self.VOLRATE,
+            "R_total": np.zeros(shape=n) * rate_unit, #self.VOLRATE
         }
         
         for i, t_center in enumerate(tqdm(time_bin_centers, desc="Comoving time bins", unit="bins")):
@@ -251,13 +254,12 @@ class MCRates:
             z_center: float = z_at_centers[i]
             z_i = z_at_edges[i]
             z_f = z_at_edges[i+1]
-            dz = np.abs(z_i - z_f)
-            E_z = E_z_at_centers[i]
+            dz = np.abs(z_f - z_i)
             
-            R_i_total = 0.0 * self.VOLRATE
-            R_i_bbh = 0.0 * self.VOLRATE
-            R_i_bhns = 0.0 * self.VOLRATE
-            R_i_bns = 0.0 * self.VOLRATE
+            N_rest_total = 0.0 * self.VOLRATE
+            N_rest_bbh = 0.0 * self.VOLRATE
+            N_rest_bhns = 0.0 * self.VOLRATE
+            N_rest_bns = 0.0 * self.VOLRATE
             
             for j, Zbin in enumerate(self.bins):
                 
@@ -274,8 +276,6 @@ class MCRates:
                     (Zbin.mergers.t_delay.values < \
                     (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
                 systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
-                if pessimistic_ce:
-                    systems = systems.loc[~systems.merge_in_ce]
                 
                 if (mass_filter_pri or mass_filter_sec):
                     component_masses = systems[["mass_1", "mass_2"]].to_numpy()
@@ -298,42 +298,43 @@ class MCRates:
                 bbh, bhns, bns = self.dco_kstar_filter(systems)
                 
                 # get time bin in which each merging system formed
-                if rigorous_SFR:
-                    SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
-                else:
-                    SFR_bins_for_systems: NDArray = self._get_bins_from_time(time_bin_centers[i:i+1], time_bin_centers)
-                    SFR_bins_for_systems = SFR_bins_for_systems.repeat(len(t_form))
-                    
+                SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
                 frac_SFR_at_t_form: NDArray = fracSFR_at_bin_centers[j,SFR_bins_for_systems]
-                Zfracs_corr_at_t_form: NDArray = Zfracs_corr[SFR_bins_for_systems]
                 
-                # calculate the rate -- see Dominik et al 2013 Eq. 16/17
+                # calculate the rest-frame merger rate -- see Dominik et al 2013 Eq. 16/17
                 Rates_intrinsic: NDArray = (\
-                    (binfrac * f_corr) * (1/Zfracs_corr_at_t_form) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
+                    (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
                 
-                R_i_total += Rates_intrinsic.sum()
-                R_i_bbh += Rates_intrinsic[bbh].sum()
-                R_i_bhns += Rates_intrinsic[bhns].sum()
-                R_i_bns += Rates_intrinsic[bns].sum()
+                N_rest_total += Rates_intrinsic.sum()
+                N_rest_bbh += Rates_intrinsic[bbh].sum()
+                N_rest_bhns += Rates_intrinsic[bhns].sum()
+                N_rest_bns += Rates_intrinsic[bns].sum()
                 
-            # append data to output dict
-            dzdt: float = dz * (((1 + z_center) * E_z) ** -1)
-            data["R_i_total"][i] = R_i_total
-            data["R_i_bbh"][i] = R_i_bbh
-            data["R_i_bhns"][i] = R_i_bhns
-            data["R_i_bns"][i] = R_i_bns
-            data["R_total"][i] = R_i_total * dzdt
-            data["R_bbh"][i] = R_i_bbh * dzdt
-            data["R_bhns"][i] = R_i_bhns * dzdt
-            data["R_bns"][i] = R_i_bns * dzdt
-
+            # prepare rates integral
+            def rate_integral(n_rest: Quantity) -> Quantity:
+                '''Integrate the rest-frame event rates to obtain a local, observable rate.'''
+                dV_z = 4 * np.pi * (const.c / cosmo.H(z_center)) *\
+                    np.float_power(cosmo.comoving_distance(z_center), 2)
+                return (n_rest * dV_z * (dz/(1 + z_center))).to(u.yr ** -1)
+            
+            data["N_total"][i] = N_rest_total
+            data["N_bbh"][i] = N_rest_bbh
+            data["N_bhns"][i] = N_rest_bhns
+            data["N_bns"][i] = N_rest_bns
+            data["R_total"][i] = rate_integral(N_rest_total)
+            data["R_bbh"][i] = rate_integral(N_rest_bbh)
+            data["R_bhns"][i] = rate_integral(N_rest_bhns)
+            data["R_bns"][i] = rate_integral(N_rest_bns)
+        
         output_df: pd.DataFrame = pd.DataFrame(data)
-        R_total_local: Quantity = data["R_total"][z_center < z_local].sum()
-        R_bbh_local: Quantity = data["R_bbh"][z_center < z_local].sum()
-        R_bhns_local: Quantity = data["R_bhns"][z_center < z_local].sum()
-        R_bns_local: Quantity = data["R_bns"][z_center < z_local].sum()
+    
+        local_universe: NDArray = output_df.z_center < z_local
+        R_tot = output_df.R_total.loc[local_universe].sum() / u.yr #* z_local
+        R_bbh = output_df.R_bbh.loc[local_universe].sum() / u.yr #* z_local
+        R_bhns = output_df.R_bhns.loc[local_universe].sum() / u.yr #* z_local
+        R_bns = output_df.R_bns.loc[local_universe].sum() / u.yr #* z_local
 
-        return R_total_local, R_bbh_local, R_bhns_local, R_bns_local, output_df
+        return R_tot, R_bbh, R_bhns, R_bns, output_df
     
     @staticmethod
     def _get_bins_from_time(t: NDArray | Quantity, time_bins: NDArray) -> NDArray | Quantity:
