@@ -183,7 +183,7 @@ def process_cosmic_models(bpp: pd.DataFrame) -> pd.DataFrame:
     '''
     ecc_range, ecc_integral = calculate_ecc_integral(1000)
     
-    bhns = get_bhns_systems(bpp)
+    bhns = get_cbc_systems(bpp)
     t_gw_sec = calculate_gw_timescale(bhns, ecc_range, ecc_integral)
     t_gw = (t_gw_sec * u.s).to(u.Myr)
     
@@ -191,11 +191,11 @@ def process_cosmic_models(bpp: pd.DataFrame) -> pd.DataFrame:
     data = {"t_gw": t_gw.value, "t_delay": t_delay}
     bhns.assign(data)
     
-    return bhns
+    return bhns.copy()
 
 
 # filter down to BHNS systems
-def get_bhns_systems(bpp: pd.DataFrame) -> pd.DataFrame:
+def get_cbc_systems(bpp: pd.DataFrame) -> pd.DataFrame:
      '''
      Provides a df containing only the following bins:
      - at at least one time, both objects are either a BH or NS

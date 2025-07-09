@@ -51,12 +51,12 @@ class Model:
         for f in filepaths:
             initCond: pd.DataFrame = pd.read_hdf(f, key="initCond")
             metallicity: float = initCond.metallicity.values[0]
-            
-            if is_prefiltered:
+
+            try:
                 mergers = pd.read_hdf(f, key="mergers")
-            else:
-                _bpp = pd.read_hdf(f, key="bpp")
-                mergers = process_cosmic_models(_bpp)
+            except:
+                bpp: pd.DataFrame = pd.read_hdf(f, key="bpp")
+                mergers = process_cosmic_models(bpp)
             
             n_singles: int = pd.read_hdf(f, key="n_singles").values.sum()
             n_binaries: int = pd.read_hdf(f, key="n_binaries").values.sum()
@@ -127,7 +127,9 @@ class MCRates:
         num_pts: int = kwargs.get("num_pts", 1000)
         sfr_function: function = kwargs.get("SFR_function", calc_SFR_madau_fragos)
         avg_met_function: function = kwargs.get("avg_met_function", calc_mean_metallicity_madau_fragos)
-        Zfracs_method: str = kwargs.get("Zfracs_method", "truncnorm")
+        Zfracs_method: str = kwargs.get("Zfracs_method", "truncnorm").lower()
+        if Zfracs_method not in ["lognorm", "truncnorm"]:
+            raise ValueError("Please supply a valid metallicity dispersion method (lognorm or truncnorm).")
         logZ_sigma_for_SFR: float = kwargs.get("logZ_sigma", 0.5)
         
         comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
