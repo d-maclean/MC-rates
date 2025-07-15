@@ -7,168 +7,37 @@ from scipy.integrate import quad
 from numpy.typing import NDArray, ArrayLike
 from astropy.units import Quantity
 
-# Madau & Fragos (2017)
+# Chruslinska+21
 
-def calc_mean_metallicity_madau_fragos(redshift: float | NDArray, Zsun: float = 0.02) -> float | NDArray:
+def MC_galaxies(redshift: float, n: int = 1000, seed: int = 0) -> pd.Series:
     '''
-    Get cosmic gas-phase metallicity means and functions using the best-fit function per Madau & Fragos 2017.
-    ### Parameters:
-    - z: redshift
-    ### Returns:
-    - mean_Z: average absolute metallicity [0<Z<1]
+    Draw a Monte-Carlo sample of galaxy masses by the method given
+    in Dominik+13. Used for obtaining metallicity distributions.
     '''
-    return np.power(10, (0.153 - 0.074 * redshift ** 1.34 )) * Zsun
-
-
-def calc_SFR_madau_fragos(redshift: float | NDArray) -> Quantity | NDArray:
-    '''
-    Cosmic redshift-dependent SFR as a function of redshift.
-    Madau & Fragos 17.
-    ### Parameters:
-    - z: redshift value(s)
-    ### Returns:
-    - SFR: star formation rate (Msun/yr/Mpc^3)
-    '''
-    numerator = np.float_power((1 + redshift), 2.6)
-    denominator = 1 + np.float_power((1 + redshift)/3.2, 6.2)
-    units = u.Msun * u.year ** -1 * u.Mpc ** -3
-    psi_z = 1e-2 * numerator/denominator * units
-
-    return psi_z
-
-def calc_truncnorm_fractional_SFR(Zbins: ArrayLike,
-                                  meanZ: ArrayLike, redshift: ArrayLike, 
-                                  SFR_at_redshift: ArrayLike, sigma_logZ: float = 0.5) -> NDArray:
-    '''
-    Use a truncated log-normal distribution to calculate fractional SFR at each metallicity;
-    notably, this method does not 'dump' SF outside the provided Zbins into the edges; instead,
-    it rescales the bins to add up to 1.
-    '''
-    l_i: int = len(redshift)
-    l_j: int = len(Zbins)
-    lgZbins = np.log10(Zbins)
+    if redshift >= 4: redshift = 4 # stop galmass evolution at 4
     
-    # test PDFs
-    Zpdf: NDArray = np.zeros(shape=(1000, l_i))
-    test_range: NDArray = np.logspace(-8, 0, 1000)
-    a_arr, b_arr = (lgZbins.min() - np.log10(meanZ)) / sigma_logZ,\
-        (lgZbins.max() - np.log10(meanZ)) / sigma_logZ
-    for i in range(l_i):
-        _pdf = truncnorm.pdf(
-            x=np.log10(test_range),
-            a=a_arr[i],
-            b=b_arr[i],
-            loc=np.log10(meanZ[i]),
-            scale=sigma_logZ
-            )
-        Zpdf[:,i] = _pdf / _pdf.sum()
+    gal_masses = np.linspace(7, 12, n)
+    galmass_pdf = Fontana_06_Mgal_pdf(redshift, gal_masses)
+    cdf = np.cumsum(galmass_pdf)
     
-    # calc Zbin edges
-    Zbin_edges: NDArray = np.zeros(shape=l_j+1, dtype=float)
-    for j in range(l_j):
-        if j == 0:
-            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
-            Zbin_edges[j] = Zbins[j]
-        elif j == l_j - 1:
-            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
-            Zbin_edges[j+1] = Zbins[j]
-        else:
-            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
-            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
+    # draw a sample
+    random_gen = np.random.default_rng(seed)
     
-    # calc truncated pdf
-    Zfracs: NDArray = np.zeros(shape=(l_j, l_i), dtype=float)
-    for i in range(l_i):
-        cdf = np.cumsum(Zpdf[:,i])
-        fracs = np.zeros(shape=l_j)
-        for j in range(l_j):
-            area_below_edges = np.interp(Zbin_edges[j:j+2], test_range, cdf)
-            fracs[j] = area_below_edges.max() - area_below_edges.min()
-        Zfracs[:,i] = fracs
     
-    # multiply result by SFR(z)
-    fracSFR = Zfracs * SFR_at_redshift
-    
-    return fracSFR
+    return
 
-def calc_adjusted_mean_for_truncnorm(desired_mean_Z: NDArray, Zmin: float, Zmax: float, sigma: float) -> NDArray:
-    '''
-    Returns an array of `adjusted` means for desired mean metalicities `desired_mean_Z`. This is necessary to correct
-    for the skew of a truncated log-normal metallicity distribution.
-    
-    ### Parameters:
-    - `desired_mean_Z`: NDArray - the `proper` mean metallicities
-    - `Zmin`: float - the minimum bin value
-    - `Zmax`: float - the maximum bin value
-    - `sigma`: float - the log-standard deviation of the log-normal distribution
-    ### Returns:
-    - NDArray - the "adjusted" absolute metallicity values to use for your truncated log-normal pdf
-    '''
-    test_log_mu: NDArray = np.log10(np.logspace(-10, 0, 1000))
-    fake_log_mu: NDArray = np.zeros(shape=1000)
-    log_Zmin, log_Zmax = np.log10(Zmin), np.log10(Zmax)
-    a, b = (log_Zmin - test_log_mu) / sigma, (log_Zmax - test_log_mu) / sigma
-
-    for j in range(1000):
-        output_log_mu = truncnorm.stats(a[j], b[j], loc=test_log_mu[j], scale=sigma, moments='m')
-        fake_log_mu[j] = output_log_mu
-    
-    means_to_pass = np.interp(np.log10(desired_mean_Z), test_log_mu, fake_log_mu)
-    
-    return 10 ** (means_to_pass)
-
-
-def calc_lognorm_fractional_SFR(Zbins: NDArray,
-                            meanZ: NDArray, redshift: NDArray, 
-                            SFR_at_redshift: NDArray, sigma_logZ: float = 0.5) -> NDArray:
-    '''
-    Use a log-normal SFR to calculate fractional SFR for each metallicity bin at each redshift/time
-    value.
-    '''
-    l_i: int = len(redshift)
-    l_j: int = len(Zbins)
-    
-    # test PDF over all metallicities
-    Z_test_range: NDArray = np.logspace(-10, 0, 1000)
-    Zpdf: NDArray = np.zeros(shape=(1000, l_i))
-    for i in range(l_i):
-        _pdf = norm.pdf(
-            x=np.log10(Z_test_range),
-            loc=np.log10(meanZ[i]),
-            scale=sigma_logZ
-            )
-        Zpdf[:,i] = _pdf / _pdf.sum()
-
-    # calc Zbin edges
-    Zbin_edges: NDArray = np.zeros(shape=l_j+1, dtype=float)
-    for j in range(l_j):
-        if j == 0:
-            Zbin_edges[j] = 0e0
-            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
-
-        elif j == l_j - 1:
-            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
-            Zbin_edges[j+1] = 1e0
-
-        else:
-            Zbin_edges[j] = np.mean(Zbins[j-1:j+1])
-            Zbin_edges[j+1] = np.mean(Zbins[j:j+2])
-            
-    # get area under Zbin edges
-    Zfracs: NDArray = np.zeros(shape=(l_j, l_i), dtype=float)
-    for i in range(l_i):
-        cdf: NDArray = np.cumsum(Zpdf[:,i])
-        fracs = np.zeros(shape=l_j)
-        for j in range(l_j):
-            area_below_edges = np.interp(Zbin_edges[j:j+2], Z_test_range, cdf)
-            fracs[j] = area_below_edges.max() - area_below_edges.min()
-        Zfracs[:,i] = fracs
+def Fontana_06_Mgal_pdf(redshift: float,
+                        mass_range: ArrayLike) -> ArrayLike:
         
-    # multiply result by SFR(z)
-    fracSFR = Zfracs * SFR_at_redshift
+    M_z = 11.16 + (0.17 * redshift) - (0.07 * redshift) ** 2
+    a = mass_range * (10 ** - M_z)
+    a_of_z = - 1.18 - (0.082 * redshift)
+    PsiS_z = 0.0035 * ((1 + redshift) ** -2.2)
     
-    return fracSFR
-
+    P_mass = PsiS_z * np.log(10) * (a ** (1 + a_of_z)) * np.exp(-a)
+    P_mass /= P_mass.sum() # normalize
+    
+    return P_mass
 
 def trivial_Pdet(data: dict) -> NDArray:
     '''Returns ones; for calculating intrinsic rates.'''
