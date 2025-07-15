@@ -3,9 +3,7 @@ from __future__ import annotations
 import numpy as np
 from astropy import units as u, constants as const
 from scipy.stats import norm, truncnorm
-from scipy.integrate import quad
-from functools import partial
-from astropy.cosmology import Cosmology, Planck18, z_at_value
+from astropy.cosmology import Cosmology, Planck15, z_at_value
 from dataclasses import dataclass
 import pandas as pd
 from tqdm import tqdm
@@ -14,11 +12,17 @@ from numpy.typing import NDArray
 from astropy.units import Quantity
 from typing import ClassVar
 
-from rates_functions import calc_mean_metallicity_madau_fragos,\
-    calc_SFR_madau_fragos, calc_lognorm_fractional_SFR,\
-    calc_truncnorm_fractional_SFR, process_cosmic_models,\
-    calc_adjusted_mean_for_truncnorm
+from rates_functions import process_cosmic_models
+from sfh_madau_fragos import madau_fragos_SFH
+from sfh_chruslinska import chruslinska19_SFH
+from sfh_illustris import illustris_TNG_SFH
 
+SFH_METHODS = {
+    "lognorm",
+    "truncnorm",
+    "illustris",
+    "chruslinska19"
+    }
 
 @dataclass
 class Model:
@@ -40,7 +44,6 @@ class Model:
         Load cosmic models and return them as a list
         ### Parameters:
         - filepaths: list - a list of h5 files
-        - is_prefiltered: bool = True - whether the data has been pre-winnowed to a list of merging systems
         ### Returns:
         - list[Model]
         '''
@@ -89,7 +92,7 @@ class Model:
             models.append(struct)
         
         sort_fn = lambda x: x.metallicity
-        models = sorted(models, key=sort_fn)
+        models = np.asarray(sorted(models, key=sort_fn))
         return models
 
 @dataclass
@@ -105,7 +108,6 @@ class MCRates:
     bins: list[Model] # (j,)
     mean_met_at_z: NDArray # (num_pts,)
     fractional_SFR_at_met: NDArray # shape (j, num_pts)
-    fcorr_SFR_fracs: NDArray # shape (num_pts) -- for correcting unmodeled SFR
     RATE: ClassVar[Quantity] =  u.yr ** -1
     VOLRATE: ClassVar[Quantity] = u.yr ** -1 * u.Gpc ** -3
 
@@ -123,50 +125,40 @@ class MCRates:
         ### Returns:
         - MCRates
         '''
-        cosmo: Cosmology = kwargs.get("cosmology", Planck18)
+        cosmo: Cosmology = kwargs.get("cosmology", Planck15)
         num_pts: int = kwargs.get("num_pts", 1000)
-        sfr_function: function = kwargs.get("SFR_function", calc_SFR_madau_fragos)
-        avg_met_function: function = kwargs.get("avg_met_function", calc_mean_metallicity_madau_fragos)
-        Zfracs_method: str = kwargs.get("Zfracs_method", "truncnorm").lower()
-        if Zfracs_method not in ["lognorm", "truncnorm"]:
-            raise ValueError("Please supply a valid metallicity dispersion method (lognorm or truncnorm).")
-        logZ_sigma_for_SFR: float = kwargs.get("logZ_sigma", 0.5)
+        SFH_method = kwargs.get("SFH_method", "truncnorm").lower()
+        if SFH_method not in SFH_METHODS:
+            raise ValueError(f"Please supply a valid metallicity dispersion method. Valid options are: {[x for x in SFH_METHODS]}")
+        logZ_sigma_for_SFH: float = kwargs.get("logZ_sigma", 0.5)
+        Zsun: float = kwargs.get("Zsun", 0.017)
         
         comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
         redshift = z_at_value(cosmo.age, comoving_time)
         
         # load binaries from COSMIC
-        bins_list = Model.load_cosmic_models(filepaths_to_models, is_prefiltered=True)
-        metallicities = [x.metallicity for x in bins_list]
+        models = Model.load_cosmic_models(filepaths_to_models)
+        metallicities = np.asarray([x.metallicity for x in models])
         
         # get Star Formation info
-        SFR_at_z = sfr_function(redshift).to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
-        mean_metallicity_at_z = avg_met_function(redshift)
+        #FSR_at_z = sfr_function(redshift).to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
+        #mean_metallicity_at_z = avg_met_function(redshift)
         
-        modeled_SFR_fracs = np.ones(shape=num_pts)
+        #modeled_SFR_fracs = np.ones(shape=num_pts)
         
-        if Zfracs_method == "lognorm":
-            fracSFR = calc_lognorm_fractional_SFR(
-                Zbins = metallicities,
-                meanZ = mean_metallicity_at_z,
-                redshift = redshift, 
-                SFR_at_redshift = SFR_at_z,
-                sigma_logZ = logZ_sigma_for_SFR
-                )
-        elif Zfracs_method == "truncnorm":
-            Zmin = min(metallicities)
-            Zmax = max(metallicities)
-            adjusted_truncnorm_means =\
-                calc_adjusted_mean_for_truncnorm(mean_metallicity_at_z, Zmin,  Zmax, logZ_sigma_for_SFR)
-            fracSFR = calc_truncnorm_fractional_SFR(
-                Zbins = metallicities,
-                meanZ = adjusted_truncnorm_means, #mean_metallicity_at_z,
-                redshift = redshift, 
-                SFR_at_redshift = SFR_at_z,
-                sigma_logZ = logZ_sigma_for_SFR
-                )
-        #elif Zfracs_method == "corrected_truncnorm":
-            
+        if SFH_method == "lognorm":
+            sfh = madau_fragos_SFH(redshift, metallicities, logZ_sigma_for_SFH, truncate_lognorm=False, Zsun=Zsun)
+        elif SFH_method == "truncnorm":
+            sfh = madau_fragos_SFH(redshift, metallicities, logZ_sigma_for_SFH, truncate_lognorm=True, Zsun=Zsun)
+        elif SFH_method == "illustris":
+            sfh = illustris_TNG_SFH(redshift, metallicities, filepath=None, cosmo=cosmo)
+        elif SFH_method == "chruslinska19":
+            sfh = chruslinska19_SFH(redshift, metallicities)
+        else:
+            raise ValueError("Couldn't find your SFH method!")
+        SFR_at_z = sfh["SFR_at_z"]
+        mean_metallicity_at_z = sfh["mean_metallicity"]
+        fractional_SFR = sfh["fractional_SFR"]
         
         # create our object and return
         params = cls(
@@ -175,10 +167,9 @@ class MCRates:
             redshift=redshift,
             SFR_at_z=SFR_at_z,
             metallicities=metallicities,
-            bins=bins_list,
+            bins=models,
             mean_met_at_z=mean_metallicity_at_z,
-            fractional_SFR_at_met=fracSFR,
-            fcorr_SFR_fracs=modeled_SFR_fracs
+            fractional_SFR_at_met=fractional_SFR,
         )
         return params
     
