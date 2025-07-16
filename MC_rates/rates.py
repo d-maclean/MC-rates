@@ -151,7 +151,7 @@ class MCRates:
         elif SFH_method == "truncnorm":
             sfh = madau_fragos_SFH(redshift, metallicities, logZ_sigma_for_SFH, truncate_lognorm=True, Zsun=Zsun)
         elif SFH_method == "illustris":
-            sfh = illustris_TNG_SFH(redshift, metallicities, filepath=None, cosmo=cosmo)
+            sfh = illustris_TNG_SFH(comoving_time, metallicities, filepath=None)
         elif SFH_method == "chruslinska19":
             sfh = chruslinska19_SFH(redshift, metallicities)
         else:
