@@ -1,43 +1,10 @@
 import numpy as np
-from astropy import units as u, constants as const
+from astropy import units as u
 import pandas as pd
-from scipy.stats import norm, truncnorm
 from scipy.integrate import quad
 
-from numpy.typing import NDArray, ArrayLike
-from astropy.units import Quantity
+from numpy.typing import NDArray
 
-# Chruslinska+21
-
-def MC_galaxies(redshift: float, n: int = 1000, seed: int = 0) -> pd.Series:
-    '''
-    Draw a Monte-Carlo sample of galaxy masses by the method given
-    in Dominik+13. Used for obtaining metallicity distributions.
-    '''
-    if redshift >= 4: redshift = 4 # stop galmass evolution at 4
-    
-    gal_masses = np.linspace(7, 12, n)
-    galmass_pdf = Fontana_06_Mgal_pdf(redshift, gal_masses)
-    cdf = np.cumsum(galmass_pdf)
-    
-    # draw a sample
-    random_gen = np.random.default_rng(seed)
-    
-    
-    return
-
-def Fontana_06_Mgal_pdf(redshift: float,
-                        mass_range: ArrayLike) -> ArrayLike:
-        
-    M_z = 11.16 + (0.17 * redshift) - (0.07 * redshift) ** 2
-    a = mass_range * (10 ** - M_z)
-    a_of_z = - 1.18 - (0.082 * redshift)
-    PsiS_z = 0.0035 * ((1 + redshift) ** -2.2)
-    
-    P_mass = PsiS_z * np.log(10) * (a ** (1 + a_of_z)) * np.exp(-a)
-    P_mass /= P_mass.sum() # normalize
-    
-    return P_mass
 
 def trivial_Pdet(data: dict) -> NDArray:
     '''Returns ones; for calculating intrinsic rates.'''
@@ -54,11 +21,11 @@ def process_cosmic_models(bpp: pd.DataFrame) -> pd.DataFrame:
     
     bhns = get_cbc_systems(bpp)
     t_gw_sec = calculate_gw_timescale(bhns, ecc_range, ecc_integral)
-    t_gw = (t_gw_sec * u.s).to(u.Myr)
+    t_gw = (t_gw_sec * u.s).to(u.Myr) #type: ignore
     
     t_delay = bhns.tphys + t_gw.value
     data = {"t_gw": t_gw.value, "t_delay": t_delay}
-    bhns.assign(data)
+    bhns.assign(**data)
     
     return bhns.copy()
 
@@ -82,7 +49,7 @@ def get_cbc_systems(bpp: pd.DataFrame) -> pd.DataFrame:
 
 
 # functions for postprocessing COSMIC data & calculate GW timescale
-def calculate_ecc_integral(n_pts: int = 1000) -> tuple[np.ndarray]:
+def calculate_ecc_integral(n_pts: int = 1000) -> tuple[NDArray, NDArray]:
      '''
      Calculate the integral on the RHS of the Peters Formula (Peters 1963)
      at n_pts points. 100 should be sufficient. As this depends
@@ -106,7 +73,7 @@ def calculate_ecc_integral(n_pts: int = 1000) -> tuple[np.ndarray]:
 
 # Peters (1964) eq. for t_gw
 def calculate_gw_timescale(df: pd.DataFrame,
-                              ecc_range: np.ndarray, ecc_int: np.ndarray) -> pd.Series:
+                              ecc_range: NDArray, ecc_int: NDArray) -> pd.Series:
      '''
      Calculate Peters' gravitational wave timescale (Peters 1963-4)
      from the COSMIC data.
