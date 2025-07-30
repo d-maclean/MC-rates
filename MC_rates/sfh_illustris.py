@@ -3,10 +3,10 @@ import h5py
 import numpy as np
 from astropy import units as u
 
-from numpy.typing import NDArray, ArrayLike
+from numpy.typing import NDArray
 
-def illustris_TNG_SFH(comoving_time: ArrayLike,
-                      metallicities: ArrayLike, filepath: str | os.PathLike = None) -> dict:
+def illustris_TNG_SFH(comoving_time: NDArray,
+                      metallicities: NDArray, filepath: str | None = None) -> dict:
     '''
     Function to calculate star formation history using a sample of Illustris TNG100 data.
     ### Parameters
@@ -26,8 +26,8 @@ def illustris_TNG_SFH(comoving_time: ArrayLike,
     n_i: int = len(comoving_time)
     n_j: int = len(metallicities)
     VOLUME_FCORR = 100 ** -3
-    SFRUNIT = u.Msun * u.yr ** -1 * u.Mpc ** -3
-    time: NDArray = comoving_time.to(u.yr).value
+    SFRUNIT = u.Msun * u.yr ** -1 * u.Mpc ** -3 #type: ignore
+    time: NDArray = comoving_time.to(u.yr).value #type: ignore
     
     # our bin edges
     Z_edges = 10 ** (np.log10(metallicities[:-1]) + ((np.log10(metallicities[1:]) - np.log10(metallicities[:-1]))/2))
@@ -38,7 +38,7 @@ def illustris_TNG_SFH(comoving_time: ArrayLike,
     print(f"Z_edges: {Z_edges.shape} / t_edges: {t_edges.shape}")
     
     if filepath is None:
-        filepath = os.path.join(__package__, 'MC_rates', "TNG100_L75n1820TNG__x-t-log_y-Z-log.hdf5")
+        filepath = os.path.join(str(__package__), 'MC_rates', "TNG100_L75n1820TNG__x-t-log_y-Z-log.hdf5")
         
     with h5py.File(filepath, 'r') as file:
         data = load_illustris_data(file)
@@ -100,8 +100,8 @@ def illustris_TNG_SFH(comoving_time: ArrayLike,
 
     
     sfh = {
-        "tng_dt": tng_dt * u.yr,
-        "time": time * u.yr,
+        "tng_dt": tng_dt * u.yr, #type: ignore
+        "time": time * u.yr, # type: ignore
         "metallicities": metallicities,
         "mean_metallicity": mean_Z_at_t,
         "SFR_at_z": total_tng_sfr * SFRUNIT,
@@ -111,7 +111,7 @@ def illustris_TNG_SFH(comoving_time: ArrayLike,
     return sfh
 
 
-def load_illustris_data(h5file: h5py.File) -> dict[NDArray]:
+def load_illustris_data(h5file: h5py.File) -> dict[str, NDArray]:
     '''What it says on the tin.'''
     tng_data = {
         "time": np.array(h5file["xedges"]),
