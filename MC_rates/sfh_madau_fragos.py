@@ -1,21 +1,20 @@
-import os
 import numpy as np
 from scipy.stats import norm, truncnorm
 from astropy import units as u
 
-from astropy.units import Quantity
-from numpy.typing import NDArray, ArrayLike
+from astropy.units import Quantity 
+from numpy.typing import NDArray
 
 
 # Madau & Fragos (2017)
 
-def madau_fragos_SFH(redshift: ArrayLike, metallicities: ArrayLike,
+def madau_fragos_SFH(redshift: NDArray, metallicities: NDArray,
                      sigma: float,truncate_lognorm: bool, Zsun: float = 0.017) -> dict:
     '''
     '''    
     Zmin = metallicities.min()
     Zmax = metallicities.max()
-    mean_Z = calc_mean_metallicity_madau_fragos(redshift, Zsun=Zsun)
+    mean_Z: NDArray = calc_mean_metallicity_madau_fragos(redshift, Zsun=Zsun)
     SFR_at_z = calc_SFR_madau_fragos(redshift)
     
     if truncate_lognorm:
@@ -34,7 +33,7 @@ def madau_fragos_SFH(redshift: ArrayLike, metallicities: ArrayLike,
     
     return sfh
 
-def calc_mean_metallicity_madau_fragos(redshift: float | NDArray, Zsun: float = 0.02) -> float | NDArray:
+def calc_mean_metallicity_madau_fragos(redshift: NDArray, Zsun: float = 0.02) -> NDArray:
     '''
     Get cosmic gas-phase metallicity means and functions using the best-fit function per Madau & Fragos 2017.
     ### Parameters:
@@ -56,14 +55,14 @@ def calc_SFR_madau_fragos(redshift: float | NDArray) -> Quantity | NDArray:
     '''
     numerator = np.float_power((1 + redshift), 2.6)
     denominator = 1 + np.float_power((1 + redshift)/3.2, 6.2)
-    units = u.Msun * u.year ** -1 * u.Mpc ** -3
+    units = u.Msun * u.year ** -1 * u.Mpc ** -3 #type: ignore
     psi_z = 1e-2 * numerator/denominator * units
 
     return psi_z
 
-def calc_truncnorm_fractional_SFR(Zbins: ArrayLike,
-                                  meanZ: ArrayLike, redshift: ArrayLike, 
-                                  SFR_at_redshift: ArrayLike, sigma_logZ: float = 0.5) -> NDArray:
+def calc_truncnorm_fractional_SFR(Zbins: NDArray,
+                                  meanZ: NDArray, redshift: NDArray, 
+                                  SFR_at_redshift: NDArray, sigma_logZ: float = 0.5) -> NDArray:
     '''
     Use a truncated log-normal distribution to calculate fractional SFR at each metallicity;
     notably, this method does not 'dump' SF outside the provided Zbins into the edges; instead,
