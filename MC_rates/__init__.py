@@ -7,7 +7,3 @@ sys.path.append(
 
 from rates import *
 from rates_functions import *
-
-if __name__ == "__main__":
-    
-    sys.exit(0)
