@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 from astropy import units as u, constants as const
-from scipy.stats import norm, truncnorm
 from astropy.cosmology import Cosmology, Planck15, z_at_value
 from dataclasses import dataclass
 import pandas as pd
@@ -10,7 +9,7 @@ from tqdm import tqdm
 
 from numpy.typing import NDArray
 from astropy.units import Quantity
-from typing import ClassVar
+from typing import ClassVar, Iterable
 
 from rates_functions import process_cosmic_models
 from sfh_madau_fragos import madau_fragos_SFH
@@ -39,7 +38,7 @@ class Model:
     imf_f_corr: float = 1.0
 
     @classmethod
-    def load_cosmic_models(cls, filepaths: str | list[str], is_prefiltered: bool = True) -> list[Model]:
+    def load_cosmic_models(cls, filepaths: str | list[str], is_prefiltered: bool = True) -> Iterable[Model]:
         '''
         Load cosmic models and return them as a list
         ### Parameters:
@@ -52,13 +51,13 @@ class Model:
         
         models = []
         for f in filepaths:
-            initCond: pd.DataFrame = pd.read_hdf(f, key="initCond")
+            initCond = pd.read_hdf(f, key="initCond")
             metallicity: float = initCond.metallicity.values[0]
 
             try:
                 mergers = pd.read_hdf(f, key="mergers")
             except:
-                bpp: pd.DataFrame = pd.read_hdf(f, key="bpp")
+                bpp: pd.DataFrame = pd.read_hdf(f, key="bpp") # type: ignore
                 mergers = process_cosmic_models(bpp)
             
             n_singles: int = pd.read_hdf(f, key="n_singles").values.sum()
@@ -104,8 +103,8 @@ class MCRates:
     SFR_at_z: NDArray
     
     # metallicity and binaries
-    metallicities: list[float]
-    bins: list[Model] # (j,)
+    metallicities: NDArray
+    bins: Iterable[Model] # (j,)
     mean_met_at_z: NDArray # (num_pts,)
     fractional_SFR_at_met: NDArray # shape (j, num_pts)
     RATE: ClassVar[Quantity] =  u.yr ** -1
@@ -176,7 +175,7 @@ class MCRates:
     # trying once again
     def calc_merger_rates(self,
                           nbins: int = 200, z_local: float = 0.1,
-                          **kwargs) -> dict[str:Quantity | pd.DataFrame]:
+                          **kwargs) -> tuple[Quantity, Quantity, Quantity, Quantity, pd.DataFrame]:
         '''Calculate dco merger rates per Dominik+2013.'''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
@@ -184,8 +183,11 @@ class MCRates:
         pessimistic_ce: bool = kwargs.get("pessimistic_ce", False)
         
         mass_filter_pri: bool = False
+        m_pri_min, m_pri_max = 0, 300
         mass_filter_sec: bool = False
+        m_sec_min, m_sec_max = 0, 300
         Z_filter: bool = False
+        Z_min, Z_max = 0e0, 1e0
         
         if primary_mass_lims is not None:
             mass_filter_pri = True
@@ -201,7 +203,7 @@ class MCRates:
             Z_max: float = Zlims[1]
         
         n: int = nbins
-        n_j: int = len(self.bins)
+        n_j: int = self.bins.shape
         cosmo: Cosmology = self.cosmology
 
         t_i: Quantity = self.comoving_time[0]
@@ -222,7 +224,7 @@ class MCRates:
         
         rate_unit = self.RATE
         
-        data: dict[str:NDArray] = {
+        data: dict[str,NDArray] = {
             "t_center": time_bin_centers.to(u.Myr),
             "t_i": time_bin_edges[:-1].to(u.Myr),
             "t_f": time_bin_edges[1:].to(u.Myr),
@@ -261,9 +263,9 @@ class MCRates:
                         continue
                 
                 #met: float = Zbin.metallicity
-                binfrac: float = Zbin.binfrac_model
-                Msim: float = Zbin.simulated_mass
-                f_corr: float = Zbin.imf_f_corr
+                binfrac = Zbin.binfrac_model
+                Msim = Zbin.simulated_mass
+                f_corr = Zbin.imf_f_corr
                 
                 t_delay_filter = \
                     (Zbin.mergers.t_delay.values < \
@@ -321,7 +323,7 @@ class MCRates:
         
         output_df: pd.DataFrame = pd.DataFrame(data)
     
-        local_universe: NDArray = output_df.z_center < z_local
+        local_universe: pd.Series[bool] = output_df.z_center < z_local
         R_tot = output_df.R_total.loc[local_universe].sum() / u.yr #* z_local
         R_bbh = output_df.R_bbh.loc[local_universe].sum() / u.yr #* z_local
         R_bhns = output_df.R_bhns.loc[local_universe].sum() / u.yr #* z_local
@@ -344,52 +346,11 @@ class MCRates:
         #return indices
     
     @staticmethod
-    def dco_kstar_filter(s: pd.DataFrame) -> tuple[NDArray, NDArray, NDArray]:
+    def dco_kstar_filter(s: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
 
         bbh = (s.kstar_1 == 14) & (s.kstar_2 == 14)
         bhns = ((s.kstar_1 == 13) & (s.kstar_2 == 14)) | ((s.kstar_1 == 14) & (s.kstar_2 == 13))
         bns = (s.kstar_1 == 13) & (s.kstar_2 == 13)
         
         return bbh, bhns, bns 
-    
-    @staticmethod
-    def calc_Zpdf(Z_values: NDArray,
-                meanZ: NDArray, sigma_logZ: float, num_pts: int) -> tuple[NDArray, NDArray]:
-        '''Use an integrated log-normal metallicity PDF to estimate the fractional SFR for each metallicity bin.'''
-        Zrange = np.linspace(1e-10, 0.2, num_pts)
-        rawZpdf = np.zeros(shape=(num_pts, num_pts), dtype=float)
-        Zcdf = rawZpdf.copy()
-        
-        for i in range(num_pts):
-            _pdf = norm.pdf(x=np.log10(Zrange), loc=np.log10(meanZ[i]), scale=sigma_logZ)
-            rawZpdf[:,i] = _pdf/_pdf.sum()
-            _cdf = np.cumsum(rawZpdf[:,i])
-            Zcdf[:,i] = _cdf
-        
-        # set edges of Zbins
-        Zbin_edges: NDArray = np.zeros(shape=len(Z_values)+1)
-        for j, jZ  in enumerate(Z_values):
-            if j == 0:
-                print("aaa!")
-                Zbin_edges[j+1] = np.mean(Z_values[j:j+2])
-                Zbin_edges[j] = jZ - (Zbin_edges[j+1] - jZ)
-            elif i == len(Z_values) - 1:
-                Zbin_edges[j] = np.mean(Z_values[j-1:j+1])
-                Zbin_edges[j+1] = jZ + (Zbin_edges[j] - jZ)
-            else:
-                Zbin_edges[j] = np.mean(Zbin_edges[j-1:j+1])
-                Zbin_edges[j+1] = np.mean(Zbin_edges[j:j+2])
-        
-        # calculate fSFR for each bin at each time value
-        fSFR_at_z: NDArray = np.zeros(shape=(len(Z_values), num_pts))
-        for j, jZ in enumerate(Z_values):
-            Z_lo = Zbin_edges[j]
-            Z_hi = Zbin_edges[j+1]
-            
-            for k in range(num_pts):
-                Pvals = np.interp([Z_lo, Z_hi], Zrange, Zcdf[:,k])
-                P_tz: float = np.abs(np.diff(Pvals))
-                fSFR_at_z[j,k] = P_tz
-
-        return Zcdf, Zbin_edges, fSFR_at_z
     
