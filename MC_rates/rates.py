@@ -13,7 +13,7 @@ from typing import ClassVar, Iterable
 
 from rates_functions import process_cosmic_models
 from sfh_madau_fragos import madau_fragos_SFH
-from sfh_chruslinska import chruslinska19_SFH
+from sfh_chruslinska_nelemans import chr_nel_SFH
 from sfh_illustris import illustris_TNG_SFH
 
 SFH_METHODS = {
@@ -131,6 +131,7 @@ class MCRates:
             raise ValueError(f"Please supply a valid metallicity dispersion method. Valid options are: {[x for x in SFH_METHODS]}")
         logZ_sigma_for_SFH: float = kwargs.get("logZ_sigma", 0.5)
         Zsun: float = kwargs.get("Zsun", 0.017)
+        chruslinska_option: str = kwargs.get("chruslinska_option", "moderate")
         
         comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
         redshift = z_at_value(cosmo.age, comoving_time)
@@ -152,7 +153,7 @@ class MCRates:
         elif SFH_method == "illustris":
             sfh = illustris_TNG_SFH(comoving_time, metallicities, filepath=None)
         elif SFH_method == "chruslinska19":
-            sfh = chruslinska19_SFH(redshift, metallicities)
+            sfh = chr_nel_SFH(comoving_time, redshift, metallicities, option=chruslinska_option, Zsun=Zsun)
         else:
             raise ValueError("Couldn't find your SFH method!")
         SFR_at_z = sfh["SFR_at_z"]
@@ -203,7 +204,7 @@ class MCRates:
             Z_max: float = Zlims[1]
         
         n: int = nbins
-        n_j: int = self.bins.shape
+        n_j: int = self.bins.shape[0]
         cosmo: Cosmology = self.cosmology
 
         t_i: Quantity = self.comoving_time[0]
