@@ -2,14 +2,13 @@ import os
 import pandas as pd
 import numpy as np
 from astropy import units as u
-from scipy.stats import norm
 
 from numpy.typing import NDArray
 
 # code to implement the cosmic star formation density histoy (SFRD) method described in
-# Chruslinska & Nelemans 2019. Data used in these calculations belong to the authors:
+# Chruslinska & Nelemans 2019. All data used in these calculations belong to the authors:
 # https://ui.adsabs.harvard.edu/abs/2019MNRAS.488.5300C/abstract
-# this code:
+# this module:
 # (C) Duncan B Maclean 2025 / BSD 3-Clause License
 
 OPTIONS = {"moderate", "highZ", "lowZ"}
@@ -34,7 +33,7 @@ def chr_nel_SFH(comoving_time: NDArray, redshift: NDArray,
     
     base_path = os.path.join(os.path.split(__file__)[0])
     timestep_data = pd.read_csv(
-            os.path.join(base_path, "chruslinska_data", "Time_redshift_deltaT.dat"),
+            os.path.join(base_path, "chruslinska_nelemans_data", "Time_redshift_deltaT.dat"),
             sep=" ",
             skiprows=[0],
             names=["time", "redshift", "dt"]
