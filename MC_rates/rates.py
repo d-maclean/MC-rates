@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import os
+from glob import glob
 import numpy as np
 from astropy import units as u, constants as const
 from astropy.cosmology import Cosmology, Planck15, z_at_value
 from dataclasses import dataclass
 import pandas as pd
 from tqdm import tqdm
-
 from numpy.typing import NDArray
+from pandas import DataFrame, Series
 from astropy.units import Quantity
-from typing import ClassVar, Iterable
+
+from typing import ClassVar, NamedTuple, Any
 
 from rates_functions import process_cosmic_models
 from sfh_madau_fragos import madau_fragos_SFH
@@ -23,165 +26,143 @@ SFH_METHODS = {
     "chruslinska19"
     }
 
-@dataclass
+
+class RatesResult(NamedTuple):
+    total: Quantity
+    bbh: Quantity
+    nsbh: Quantity
+    bns: Quantity
+    data: DataFrame
+
+
 class Model:
-    metallicity: float
-    initCond: pd.DataFrame
-    mergers: pd.DataFrame
+
+    cache: ClassVar[dict[str,dict[str,Any]]] = {} # cache
+
+    def __init__(self, filepath: str, **kwargs):
+
+        if not os.path.isfile(filepath):
+            raise FileNotFoundError(f"{filepath} not found!")
+                        
+
+        self.f_corr = kwargs.get("f_corr", 1.0)
+        if filepath in self.cache:
+            _data = self.cache[filepath]
+            for key, value in _data.items():
+                setattr(self, key, value)
+            return
+
+        with pd.HDFStore(filepath, mode="r") as store:
+
+            self.initCond = store.get("initCond")
+            self.metallicity: float = self.initCond.metallicity.values[0]
+            if "/mergers" in store.keys():
+                self.mergers = store.get("mergers")
+            else:
+                self.mergers = process_cosmic_models(store.get("bpp"))
+            
+            self.n_singles: int = store.get("n_singles").values.max()
+            self.n_binaries: int = store.get("n_binaries").values.max()
+            self.n_stars: int = store.get("n_stars").values.max()
+            self.binfrac_model: float = self.n_binaries / (2 * self.n_binaries + self.n_singles)
+            self.mass_singles: float = store.get("mass_singles").values.max()
+            self.mass_binaries: float = store.get("mass_binaries").values.max() 
+            self.mass_stars: float = store.get("mass_stars").values.max()           
+            self.Msim: Quantity = self.mass_stars * u.Msun
+            self.Mpop: Quantity = (self.initCond.mass_1.sum() + self.initCond.mass_2.sum()) * u.Msun
+
+        self.cache[filepath] = {
+            "metallicity": self.metallicity,
+            "initCond": self.initCond,
+            "mergers": self.mergers,
+            "n_singles": self.n_binaries,
+            "n_binaries": self.n_binaries,
+            "binfrac_model": self.binfrac_model,
+            "mass_singles": self.mass_singles,
+            "mass_binaries": self.mass_binaries,
+            "mass_stars": self.mass_stars,
+            "Msim": self.Msim,
+            "Mpop": self.Mpop
+        }
+
+        return
     
-    # pop statistics
-    n_singles: int
-    n_binaries: int
-    binfrac_model: float = 0.7
-    total_star_mass: Quantity["mass"] = 0.0 * u.Msun
-    simulated_mass: Quantity["mass"] = 0.0 * u.Msun
-    imf_f_corr: float = 1.0
+    @staticmethod
+    def get_hash(filepath: str, **kwargs) -> int:
+        kw = kwargs.copy()
+        kw["filepath"] = filepath
+        return hash(frozenset(kw.items()))
+    
 
     @classmethod
-    def load_cosmic_models(cls, filepaths: str | list[str], is_prefiltered: bool = True) -> Iterable[Model]:
-        '''
-        Load cosmic models and return them as a list
-        ### Parameters:
-        - filepaths: list - a list of h5 files
-        ### Returns:
-        - list[Model]
-        '''
-        if isinstance(filepaths, str):
-            filepaths = [filepaths]
-        
-        models = []
-        for f in filepaths:
-            initCond = pd.read_hdf(f, key="initCond")
-            metallicity: float = initCond.metallicity.values[0]
+    def load_cosmic_models(cls, files: str | list[str], **kwargs) -> NDArray[Any[Model]]:
 
-            try:
-                mergers = pd.read_hdf(f, key="mergers")
-            except:
-                bpp: pd.DataFrame = pd.read_hdf(f, key="bpp") # type: ignore
-                mergers = process_cosmic_models(bpp)
-            
-            n_singles: int = pd.read_hdf(f, key="n_singles").values.sum()
-            n_binaries: int = pd.read_hdf(f, key="n_binaries").values.sum()
-            binfrac_model: float = n_binaries / (n_binaries + n_singles)
-            
-            mass_singles: float = pd.read_hdf(f, key="mass_singles").values.sum()
-            mass_binaries: float = pd.read_hdf(f, key="mass_binaries").values.sum()            
-            Msim: Quantity = (mass_singles + mass_binaries) * u.Msun
-            
-            if is_prefiltered:
-                Mpop: Quantity = pd.read_hdf(f, key="total_kept_mass").values.sum() * u.Msun
-            else:
-                Mpop: Quantity = (initCond.mass_1.sum() + initCond.mass_2.sum()) * u.Msun
-            
-            f_corr = Mpop/Msim
-            
-            data = {
-                "metallicity": metallicity,
-                "initCond": initCond,
-                "mergers": mergers,
-                "n_singles": n_singles,
-                "n_binaries": n_binaries,
-                "binfrac_model": binfrac_model,
-                "total_star_mass": Mpop,
-                "simulated_mass": Msim,
-                "imf_f_corr": f_corr
-                }
-            
-            struct = cls(**data)
-            models.append(struct)
-        
+        if isinstance(files, str):
+            files = glob(os.path.join(files, "*.h*5"))
+            if len(files) == 0:
+                raise FileNotFoundError(f"Can't find any model files at {files}!")
+
+        models = [cls(f, **kwargs) for f in files]
         sort_fn = lambda x: x.metallicity
         models = np.asarray(sorted(models, key=sort_fn))
         return models
 
-@dataclass
+
 class MCRates:
-    '''Object to contain all info for rates calculation.'''
-    cosmology: Cosmology
-    comoving_time: NDArray[u.Myr] # (num_pts,)
-    redshift: NDArray
-    SFR_at_z: NDArray
-    
-    # metallicity and binaries
-    metallicities: NDArray
-    bins: Iterable[Model] # (j,)
-    mean_met_at_z: NDArray # (num_pts,)
-    fractional_SFR_at_met: NDArray # shape (j, num_pts)
+
     RATE: ClassVar[Quantity] =  u.yr ** -1
     VOLRATE: ClassVar[Quantity] = u.yr ** -1 * u.Gpc ** -3
 
-    @classmethod
-    def init_sampler(cls, t0: Quantity, tf: Quantity,
-                    filepaths_to_models: list[str], model_type: str = "cosmic", **kwargs) -> MCRates:
-        '''
-        Create an MCRates instance with all the necessary information to
-        draw samples and calculate rates.
-        ### Parameters:
-        - t0, tf: Quantity - earliest and latest comoving time values
-        - filepaths_to_models: list[str] - the locations of models
-        - model_type: str = "cosmic" - the type of model to use
-        - **kwargs
-        ### Returns:
-        - MCRates
-        '''
-        cosmo: Cosmology = kwargs.get("cosmology", Planck15)
+    def __init__(self, t0: Quantity, tf: Quantity, models: str | list[str], **kwargs):
+
+        self.cosmology: Cosmology = kwargs.get("cosmology", Planck15)
+        self.Zsun: float = kwargs.get("Zsun", 0.017)
         num_pts: int = kwargs.get("num_pts", 1000)
-        SFH_method = kwargs.get("SFH_method", "truncnorm").lower()
-        if SFH_method not in SFH_METHODS:
+        self.sfh_method = kwargs.get("sfh_method")
+        if self.sfh_method not in SFH_METHODS:
             raise ValueError(f"Please supply a valid metallicity dispersion method. Valid options are: {[x for x in SFH_METHODS]}")
         logZ_sigma_for_SFH: float = kwargs.get("logZ_sigma", 0.5)
-        Zsun: float = kwargs.get("Zsun", 0.017)
         chruslinska_option: str = kwargs.get("chruslinska_option", "moderate")
-        
-        comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
-        redshift = z_at_value(cosmo.age, comoving_time)
-        
-        # load binaries from COSMIC
-        models = Model.load_cosmic_models(filepaths_to_models)
-        metallicities = np.asarray([x.metallicity for x in models])
-        
-        # get Star Formation info
-        #FSR_at_z = sfr_function(redshift).to(u.Msun * u.yr ** -1 * u.Mpc ** -3)
-        #mean_metallicity_at_z = avg_met_function(redshift)
-        
-        #modeled_SFR_fracs = np.ones(shape=num_pts)
-        
-        if SFH_method == "lognorm":
-            sfh = madau_fragos_SFH(redshift, metallicities, logZ_sigma_for_SFH, truncate_lognorm=False, Zsun=Zsun)
-        elif SFH_method == "truncnorm":
-            sfh = madau_fragos_SFH(redshift, metallicities, logZ_sigma_for_SFH, truncate_lognorm=True, Zsun=Zsun)
-        elif SFH_method == "illustris":
-            sfh = illustris_TNG_SFH(comoving_time, metallicities, filepath=None)
-        elif SFH_method == "chruslinska19":
-            sfh = chr_nel_SFH(comoving_time, redshift, metallicities, option=chruslinska_option, Zsun=Zsun)
+        optimistic_ce: bool = kwargs.get("optimistic_ce", True)
+        f_corr: float = kwargs.get("f_corr", 1.0)
+
+        self.comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
+        self.redshift = z_at_value(self.cosmology.age, self.comoving_time)
+
+        self.bins = Model.load_cosmic_models(models, f_corr=f_corr)  
+        self.metallicities = np.asarray([x.metallicity for x in self.bins])
+
+        if self.sfh_method == "lognorm":
+            sfh = madau_fragos_SFH(self.redshift, self.metallicities, logZ_sigma_for_SFH, truncate_lognorm=False, Zsun=self.Zsun)
+        elif self.sfh_method == "truncnorm":
+            sfh = madau_fragos_SFH(self.redshift, self.metallicities, logZ_sigma_for_SFH, truncate_lognorm=True, Zsun=self.Zsun)
+        elif self.sfh_method == "illustris":
+            sfh = illustris_TNG_SFH(self.comoving_time, self.metallicities, filepath=None)
+        elif self.sfh_method == "chruslinska19":
+            sfh = chr_nel_SFH(self.comoving_time, self.redshift, self.metallicities, option=chruslinska_option, Zsun=self.Zsun)
         else:
             raise ValueError("Couldn't find your SFH method!")
-        SFR_at_z = sfh["SFR_at_z"]
-        mean_metallicity_at_z = sfh["mean_metallicity"]
-        fractional_SFR = sfh["fractional_SFR"]
-        
-        # create our object and return
-        params = cls(
-            cosmology=cosmo,
-            comoving_time=comoving_time,
-            redshift=redshift,
-            SFR_at_z=SFR_at_z,
-            metallicities=metallicities,
-            bins=models,
-            mean_met_at_z=mean_metallicity_at_z,
-            fractional_SFR_at_met=fractional_SFR,
-        )
-        return params
-    
+        self.SFR_at_z = sfh["SFR_at_z"]
+        self.mean_metallicity_at_z = sfh["mean_metallicity"]
+        self.fractional_SFR_at_met = sfh["fractional_SFR"]
+
+        return
+
+    @classmethod
+    def init_sampler(cls, *args, **kwargs):
+        '''Alias for __init__'''
+        cls.__init__(*args, **kwargs)
+        return
+
     # trying once again
     def calc_merger_rates(self,
                           nbins: int = 200, z_local: float = 0.1,
-                          **kwargs) -> tuple[Quantity, Quantity, Quantity, Quantity, pd.DataFrame]:
+                          **kwargs) -> RatesResult:
         '''Calculate dco merger rates per Dominik+2013.'''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
-        pessimistic_ce: bool = kwargs.get("pessimistic_ce", False)
+        optimistic_ce: bool = kwargs.get("optimistic_ce", True) 
         
         mass_filter_pri: bool = False
         m_pri_min, m_pri_max = 0, 300
@@ -265,8 +246,8 @@ class MCRates:
                 
                 #met: float = Zbin.metallicity
                 binfrac = Zbin.binfrac_model
-                Msim = Zbin.simulated_mass
-                f_corr = Zbin.imf_f_corr
+                Msim = Zbin.Msim
+                f_corr = Zbin.f_corr
                 
                 t_delay_filter = \
                     (Zbin.mergers.t_delay.values < \
@@ -330,7 +311,7 @@ class MCRates:
         R_bhns = output_df.R_bhns.loc[local_universe].sum() / u.yr #* z_local
         R_bns = output_df.R_bns.loc[local_universe].sum() / u.yr #* z_local
 
-        return R_tot, R_bbh, R_bhns, R_bns, output_df
+        return RatesResult(R_tot, R_bbh, R_bhns, R_bns, output_df)
     
     @staticmethod
     def _get_bins_from_time(t: NDArray | Quantity, time_bins: NDArray) -> NDArray | Quantity:
