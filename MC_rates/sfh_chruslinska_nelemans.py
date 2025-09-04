@@ -45,11 +45,11 @@ def chr_nel_SFH(comoving_time: NDArray, redshift: NDArray,
     dt = timestep_data.dt.values * u.Myr
     
     # default
-    file = os.path.join(base_path, "chruslinska_data", "moderate_FOH_z_dM.dat")
+    file = os.path.join(base_path, "chruslinska_nelemans_data", "moderate_FOH_z_dM.dat")
     if option == "highZ":
-        file = os.path.join(base_path, "chruslinska_data", "high-Z-extreme_FOH_z_dM.dat")
+        file = os.path.join(base_path, "chruslinska_nelemans_data", "high-Z_extreme_FOH_z_dM.dat")
     elif option == "lowZ":
-        file = os.path.join(base_path, "chruslinska_data", "low-Z_extreme_FOH_z_dM.dat")
+        file = os.path.join(base_path, "chruslinska_nelemans_data", "low-Z_extreme_FOH_z_dM.dat")
     
     sf_data = pd.read_csv(
         file,
@@ -57,12 +57,12 @@ def chr_nel_SFH(comoving_time: NDArray, redshift: NDArray,
         skiprows = [0],
         names = Z_abs
         )
-    print(sf_data.isnull().any(axis=None))
-    print(sf_data.index[sf_data.isnull().any(axis=1)])
+    #print(sf_data.isnull().any(axis=None))
+    #print(sf_data.index[sf_data.isnull().any(axis=1)])
 
-    print(sf_data)
+    #print(sf_data)
     sf = sf_data.to_numpy(dtype=float, na_value=0e0)[:,:] * (u.Msun * u.Mpc**-3)
-    print(sf)
+    #print(sf)
     
     SFR_at_z = np.zeros(shape=n_i) * u.Msun * u.Mpc ** -3 * u.yr ** -1
     mean_Z = np.zeros(shape=n_i)

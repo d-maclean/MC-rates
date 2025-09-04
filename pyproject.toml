@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=75.8", "numpy>=2.0", "pandas>=2.0", "astropy>=6.1.7", "scipy>=1.15.1"]
+requires = ["setuptools>=75.8", "numpy>=2.0", "pandas>=2.0", "astropy>=6.1.7", "scipy>=1.15.1", "tqdm", "h5py"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "MC_rates"
-version = "0.1"
+version = "0.2"
 authors = [
   { name="Duncan Maclean", email="dmaclean@unc.edu" },
 ]
@@ -22,5 +22,5 @@ license-files = ["LICEN[CS]E*"]
 Homepage = "https://github.com/d-maclean/MC-rates"
 Issues = "https://github.cowm/d-maclean/MC-rates/issues"
 
-[tool.pyright]
-reportAttributeAccessIssue = false
+[tool.setuptools.package-data]
+MC_rates = ["TNG100_L75n1820TNG__x-t-log_y-Z-log.hdf5", "chruslinska_nelemans_data/*.dat"]

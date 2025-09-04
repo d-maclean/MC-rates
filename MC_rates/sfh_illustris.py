@@ -38,7 +38,7 @@ def illustris_TNG_SFH(comoving_time: NDArray,
     print(f"Z_edges: {Z_edges.shape} / t_edges: {t_edges.shape}")
     
     if filepath is None:
-        filepath = os.path.join(str(__package__), 'MC_rates', "TNG100_L75n1820TNG__x-t-log_y-Z-log.hdf5")
+        filepath = os.path.join(os.path.split(os.path.abspath(__file__))[0], "TNG100_L75n1820TNG__x-t-log_y-Z-log.hdf5")
         
     with h5py.File(filepath, 'r') as file:
         data = load_illustris_data(file)
