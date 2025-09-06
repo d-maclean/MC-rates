@@ -34,9 +34,7 @@ def illustris_TNG_SFH(comoving_time: NDArray,
     Z_edges = np.concat([[metallicities[0]], Z_edges, [metallicities[-1]]])
     t_edges = 10 ** (np.log10(time[:-1]) + ((np.log10(time[1:]) - np.log10(time[:-1]))/2))
     t_edges = np.concat([[time[0]], t_edges, [time[-1]]])
-    
-    print(f"Z_edges: {Z_edges.shape} / t_edges: {t_edges.shape}")
-    
+        
     if filepath is None:
         filepath = os.path.join(os.path.split(os.path.abspath(__file__))[0], "TNG100_L75n1820TNG__x-t-log_y-Z-log.hdf5")
         
@@ -92,7 +90,7 @@ def illustris_TNG_SFH(comoving_time: NDArray,
                 
         sfr_ij = Z_binned_sf[:,t_bins_mask].sum(axis = 1) / dt * VOLUME_FCORR
         cdf = np.cumsum(sfr_ij)
-        cdf /= cdf.sum()
+        cdf /= cdf[-1]
         _z = np.interp(0.5e0, cdf, metallicities) # TODO
         mean_Z_at_t[i] = _z
         total_tng_sfr[i] = tng_sf[t_bins_mask].sum(axis=None) / dt * VOLUME_FCORR
