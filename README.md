@@ -1,7 +1,13 @@
 # MC-rates
 
-This package provides two classes and some functions to perform transient DCO merger event rates calculations using
-binary populations evolved with [COSMIC](https://github.com/COSMIC-PopSynth/COSMIC). Theoretically it can work with other formats, but I haven't implemented any yet. 
+This package provides classes and functions for calculating rates of transient gravitational-wave merger events. 
+It is built to take binary populations evolved with [COSMIC](https://iopscience.iop.org/article/10.3847/1538-4357/ab9d85) as input; however,
+any monte-carlo population which contains the right information can work.
+
+The code uses a configurable star formation history prescription to calculate the stellar mass and metallicity of stars formed
+at a slice of cosmic time, and then obtains the rate of binary coalescenes from the metallicity and delay times of each system
+in your monte-carlo model. Thorough explanations of this method are available in [Dominik et al. (2013)](https://iopscience.iop.org/article/10.1088/0004-637X/779/1/72)
+and [Bavera et al (2020)](https://www.aanda.org/articles/aa/full_html/2020/03/aa36204-19/aa36204-19.html).
 
 ### Installation
 
@@ -13,29 +19,30 @@ pip install .
 
 ### Usage Example
 
+1. Import the library
+
 ```
-from glob import glob
 from astropy import units as u
-from MC_rates import MCParams, init_sampler, calc_MC_rates
-
-# point to your data
-files = glob("../path-to-files/output-sse/*.hdf5")
-t0 = 300 * u.Myr
-tf = 13700 * u.Myr
-
-# make a sampler with comoving time values spaced between t0 and tf
-sampler = init_sampler(t0, tf, files)
-
-# draw 100 samples in time for each system, weighted by the relative
-# star formation density of each metallicity across cosmic time
-# use the sample to calculate merger rates, which are returned as a
-# dataframe of event weights for each sample.
-weights = calc_MC_rates(sampler, n=100, seed=0)
-rates = weights[your z/Z/mass filter here].sum
+from MC_rates import MCRates
 ```
 
-### References & Further Reading
+2. Initialize an MCRates object with your chosen models
 
-- [Bavera et al. (2020)](https://doi.org/10.1051/0004-6361/201936204)
-- [Dominik et al. (2015)](https://iopscience.iop.org/article/10.1088/0004-637X/806/2/263)
+```
+t0 = 600 * u.Myr
+tf = 13700 * u.Myr
+path_to_models = "/your/path/here"
+rates_obj = MCRates(t0, tf, path_to_models, sfh_method="truncnorm")
+```
+
+3. Calculate merger rates in some local slice of the universe (supplied by `z_local`):
+
+```
+rates = rates_obj.calc_merger_rates(z_local=0.1)
+```
+
+#### Star Formation Histories:
+
 - [Madau & Fragos (2017)](https://arxiv.org/abs/1606.07887v2)
+- [Illustris TNG (2017-2019)](https://www.tng-project.org/)
+- [Chruslinska & Nelemans (2019)](https://academic.oup.com/mnras/pdf-lookup/doi/10.1093/mnras/stz2057)
