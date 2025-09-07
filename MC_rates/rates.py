@@ -123,7 +123,6 @@ class MCRates:
             raise ValueError(f"Please supply a valid metallicity dispersion method. Valid options are: {[x for x in SFH_METHODS]}")
         logZ_sigma_for_SFH: float = kwargs.get("logZ_sigma", 0.5)
         chruslinska_option: str = kwargs.get("chruslinska_option", "moderate")
-        optimistic_ce: bool = kwargs.get("optimistic_ce", True)
         f_corr: float = kwargs.get("f_corr", 1.0)
 
         self.comoving_time = np.linspace(t0, tf, num_pts).to(u.Myr)
@@ -253,6 +252,12 @@ class MCRates:
                     (Zbin.mergers.t_delay.values < \
                     (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
                 systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
+
+                if not optimistic_ce:
+                    if "merge_in_ce" not in systems.columns:
+                        print("Warning: Can't find `merge_in_ce` column in your data files. Proceeding with optimistic_ce.")
+                    else:
+                        systems = systems.loc[~systems.merge_in_ce]
                 
                 if (mass_filter_pri or mass_filter_sec):
                     component_masses = systems[["mass_1", "mass_2"]].to_numpy()
