@@ -202,9 +202,7 @@ class MCRates:
         for j in range(n_j):
             fracSFR_at_bin_centers[j,:] = \
                 np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
-        
-        rate_unit = self.RATE
-        
+                
         data: dict[str,NDArray] = {
             "t_center": time_bin_centers.to(u.Myr),
             "t_i": time_bin_edges[:-1].to(u.Myr),
@@ -217,10 +215,10 @@ class MCRates:
             "N_bhns": np.zeros(shape=n) * self.VOLRATE,
             "N_bns": np.zeros(shape=n) * self.VOLRATE,
             "N_total": np.zeros(shape=n) * self.VOLRATE,
-            "R_bbh": np.zeros(shape=n) * rate_unit, #self.VOLRATE,
-            "R_bhns": np.zeros(shape=n) * rate_unit, #self.VOLRATE,
-            "R_bns": np.zeros(shape=n) * rate_unit, #self.VOLRATE,
-            "R_total": np.zeros(shape=n) * rate_unit, #self.VOLRATE
+            "R_bbh": np.zeros(shape=n) * self.RATE,
+            "R_bhns": np.zeros(shape=n) * self.RATE,
+            "R_bns": np.zeros(shape=n) * self.RATE,
+            "R_total": np.zeros(shape=n) * self.RATE,
         }
         
         for i, t_center in enumerate(tqdm(time_bin_centers, desc="Comoving time bins", unit="bins")):
