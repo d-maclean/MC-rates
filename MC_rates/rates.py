@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 from glob import glob
+from multiprocessing import set_start_method
+from multiprocessing.pool import Pool
+from functools import partial
 import numpy as np
 from astropy import units as u, constants as const
 from astropy.cosmology import Cosmology, Planck15, z_at_value
@@ -161,27 +164,8 @@ class MCRates:
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
-        optimistic_ce: bool = kwargs.get("optimistic_ce", True) 
-        
-        mass_filter_pri: bool = False
-        m_pri_min, m_pri_max = 0, 300
-        mass_filter_sec: bool = False
-        m_sec_min, m_sec_max = 0, 300
-        Z_filter: bool = False
-        Z_min, Z_max = 0e0, 1e0
-        
-        if primary_mass_lims is not None:
-            mass_filter_pri = True
-            m_pri_min: float = primary_mass_lims[0]
-            m_pri_max: float = primary_mass_lims[1]
-        if secondary_mass_lims is not None:
-            mass_filter_sec = True
-            m_sec_min: float = secondary_mass_lims[0]
-            m_sec_max: float = secondary_mass_lims[1]
-        if Zlims is not None:
-            Z_filter = True
-            Z_min: float = Zlims[0]
-            Z_max: float = Zlims[1]
+        optimistic_ce: bool = kwargs.get("optimistic_ce", True)
+        nproc: int = kwargs.get("nproc", 1)
         
         n: int = nbins
         n_j: int = self.bins.shape[0]
@@ -195,7 +179,6 @@ class MCRates:
         for i in range(n):
             time_bin_centers[i] = np.mean(time_bin_edges[i:i+2])
         z_at_centers: NDArray = z_at_value(cosmo.age, time_bin_centers)
-        E_z_at_centers: NDArray = cosmo.efunc(z_at_centers)
         
         fracSFR_at_bin_centers: NDArray = \
             np.zeros(shape=(n_j, n), dtype=float) * (u.Msun * u.yr ** -1 * u.Mpc ** -3)
@@ -203,119 +186,165 @@ class MCRates:
             fracSFR_at_bin_centers[j,:] = \
                 np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
                 
-        data: dict[str,NDArray] = {
-            "t_center": time_bin_centers.to(u.Myr),
-            "t_i": time_bin_edges[:-1].to(u.Myr),
-            "t_f": time_bin_edges[1:].to(u.Myr),
-            "z_center": z_at_centers,
-            "z_i": z_at_edges[:-1],
-            "z_f": z_at_edges[1:],
-            "E_z": E_z_at_centers,
-            "N_bbh": np.zeros(shape=n) * self.VOLRATE,
-            "N_bhns": np.zeros(shape=n) * self.VOLRATE,
-            "N_bns": np.zeros(shape=n) * self.VOLRATE,
-            "N_total": np.zeros(shape=n) * self.VOLRATE,
-            "R_bbh": np.zeros(shape=n) * self.RATE,
-            "R_bhns": np.zeros(shape=n) * self.RATE,
-            "R_bns": np.zeros(shape=n) * self.RATE,
-            "R_total": np.zeros(shape=n) * self.RATE,
-        }
+        columns = [
+            "t_center",
+            "t_i",
+            "t_f",
+            "z_center",
+            "z_i",
+            "z_f",
+            "N_bbh",
+            "N_bhns",
+            "N_bns",
+            "N_total",
+            "R_bbh",
+            "R_bhns",
+            "R_bhns",
+            "R_total"]
         
-        for i, t_center in enumerate(tqdm(time_bin_centers, desc="Comoving time bins", unit="bins")):
-            
-            t_i = time_bin_edges[i]
-            t_f = time_bin_edges[i+1]
-            z_center: float = z_at_centers[i]
-            z_i = z_at_edges[i]
-            z_f = z_at_edges[i+1]
-            dz = np.abs(z_f - z_i)
-            
-            N_rest_total = 0.0 * self.VOLRATE
-            N_rest_bbh = 0.0 * self.VOLRATE
-            N_rest_bhns = 0.0 * self.VOLRATE
-            N_rest_bns = 0.0 * self.VOLRATE
-            
-            for j, Zbin in enumerate(self.bins):
-                
-                if Z_filter:
-                    if (Zbin.metallicity > Z_max) or (Zbin.metallicity < Z_min):
-                        continue
-                
-                #met: float = Zbin.metallicity
-                binfrac = Zbin.binfrac_model
-                Msim = Zbin.Msim
-                f_corr = Zbin.f_corr
-                
-                t_delay_filter = \
-                    (Zbin.mergers.t_delay.values < \
-                    (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
-                systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
-
-                if not optimistic_ce:
-                    if "merge_in_ce" not in systems.columns:
-                        print("Warning: Can't find `merge_in_ce` column in your data files. Proceeding with optimistic_ce.")
-                    else:
-                        systems = systems.loc[~systems.merge_in_ce]
-                
-                if (mass_filter_pri or mass_filter_sec):
-                    component_masses = systems[["mass_1", "mass_2"]].to_numpy()
-                    primary_mass = component_masses.max(axis=1)
-                    secondary_mass = component_masses.min(axis=1)
-                    
-                    if (mass_filter_pri and mass_filter_sec):
-                        mass_filter = (primary_mass >= m_pri_min) & (primary_mass < m_pri_max) &\
-                            (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
-                    elif (mass_filter_pri):
-                        mass_filter = (primary_mass >= m_pri_min) & (primary_mass < m_pri_max)
-                    elif (mass_filter_sec):
-                        mass_filter = (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
-                    else:
-                        raise ValueError()
-                    systems = systems[mass_filter]
-                
-                t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
-                # get system type for each dco
-                bbh, bhns, bns = self.dco_kstar_filter(systems)
-                
-                # get time bin in which each merging system formed
-                SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
-                frac_SFR_at_t_form: NDArray = fracSFR_at_bin_centers[j,SFR_bins_for_systems]
-                
-                # calculate the rest-frame merger rate -- see Dominik et al 2013 Eq. 16/17
-                Rates_intrinsic: NDArray = (\
-                    (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
-                
-                N_rest_total += Rates_intrinsic.sum()
-                N_rest_bbh += Rates_intrinsic[bbh].sum()
-                N_rest_bhns += Rates_intrinsic[bhns].sum()
-                N_rest_bns += Rates_intrinsic[bns].sum()
-                
-            # prepare rates integral
-            def rate_integral(n_rest: Quantity) -> Quantity:
-                '''Integrate the rest-frame event rates to obtain a local, observable rate.'''
-                dV_z = 4 * np.pi * (const.c / cosmo.H(z_center)) *\
-                    np.float_power(cosmo.comoving_distance(z_center), 2)
-                return (n_rest * dV_z * (dz/(1 + z_center))).to(u.yr ** -1)
-            
-            data["N_total"][i] = N_rest_total
-            data["N_bbh"][i] = N_rest_bbh
-            data["N_bhns"][i] = N_rest_bhns
-            data["N_bns"][i] = N_rest_bns
-            data["R_total"][i] = rate_integral(N_rest_total)
-            data["R_bbh"][i] = rate_integral(N_rest_bbh)
-            data["R_bhns"][i] = rate_integral(N_rest_bhns)
-            data["R_bns"][i] = rate_integral(N_rest_bns)
+        # tqdm the pool here
+        set_start_method('spawn')
+        with Pool(nproc) as pool:
+            # fn_args = (partial)
+            bins_idx = range(0, nbins)
+            rate_args = partial(
+                self._rates_worker,
+                t_centers=time_bin_centers,
+                z_centers=z_at_centers,
+                t_edges=time_bin_edges,
+                z_edges=z_at_edges,
+                frac_SFR=fracSFR_at_bin_centers,
+                optimistic_ce=optimistic_ce,
+                Zlims=Zlims,
+                m1lims=primary_mass_lims,
+                m2lims=secondary_mass_lims
+                )
+            rates_data = list(tqdm(pool.imap(rate_args, bins_idx)))
         
-        output_df: pd.DataFrame = pd.DataFrame(data)
+        output_arr = np.concat(rates_data, axis=0, dtype=object)
+        output_df: pd.DataFrame = pd.DataFrame(output_arr, columns=columns)
+        # TODO units
+        #output_df.loc[:,["t_center", "t_i", "t_f"]] *= u.Myr
+        #output_df.loc[:,["N_total", "N_bbh", "N_bhns", "N_bns"]] *= u.yr ** -1 * u.Gpc ** -3
+        #output_df.loc[:,[""]]
     
         local_universe: pd.Series[bool] = output_df.z_center < z_local
-        R_tot = output_df.R_total.loc[local_universe].sum() / u.yr #* z_local
-        R_bbh = output_df.R_bbh.loc[local_universe].sum() / u.yr #* z_local
-        R_bhns = output_df.R_bhns.loc[local_universe].sum() / u.yr #* z_local
-        R_bns = output_df.R_bns.loc[local_universe].sum() / u.yr #* z_local
+        R_tot = output_df.R_total.loc[local_universe].sum() / u.yr
+        R_bbh = output_df.R_bbh.loc[local_universe].sum() / u.yr
+        R_bhns = output_df.R_bhns.loc[local_universe].sum() / u.yr
+        R_bns = output_df.R_bns.loc[local_universe].sum() / u.yr
 
         return RatesResult(R_tot, R_bbh, R_bhns, R_bns, output_df)
     
+
+    def _rates_worker(self,
+                     i:int,
+                     t_centers: NDArray,
+                     z_centers: NDArray,
+                     t_edges: NDArray,
+                     z_edges: NDArray,
+                     frac_SFR: NDArray,
+                     optimistic_ce: bool = True,
+                     Zlims: tuple | None = None,
+                     m1lims: tuple | None = None,
+                     m2lims: tuple | None = None) -> NDArray:
+
+        result = np.zeros(15, dtype=float)
+        t_center = t_centers[i]
+        t_i = t_edges[i]
+        t_f = t_edges[i+1]
+        z_center: float = z_centers[i].value
+        z_i = z_edges[i]
+        z_f = z_edges[i+1]
+        dz = np.abs(z_f - z_i).value
+
+        N_rest_total = 0.0 * self.VOLRATE
+        N_rest_bbh = 0.0 * self.VOLRATE
+        N_rest_bhns = 0.0 * self.VOLRATE
+        N_rest_bns = 0.0 * self.VOLRATE
+            
+        for j, Zbin in enumerate(self.bins):
+            
+            if Zlims is not None:
+                Z_min = Zlims[0]
+                Z_max = Zlims[1]
+                if (Zbin.metallicity > Z_max) or (Zbin.metallicity < Z_min):
+                    continue
+                
+            #met: float = Zbin.metallicity
+            binfrac = Zbin.binfrac_model
+            Msim = Zbin.Msim
+            f_corr = Zbin.f_corr
+                
+            t_delay_filter = \
+                (Zbin.mergers.t_delay.values < \
+                (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
+            systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
+
+            if not optimistic_ce:
+                if "merge_in_ce" not in systems.columns:
+                    print("Warning: Can't find `merge_in_ce` column in your data files. Proceeding with optimistic_ce.")
+                else:
+                    systems = systems.loc[~systems.merge_in_ce]
+                
+            if (m1lims is not None or m2lims is not None):
+                component_masses = systems[["mass_1", "mass_2"]].to_numpy()
+                primary_mass = component_masses.max(axis=1)
+                secondary_mass = component_masses.min(axis=1)
+                    
+                if (m1lims is not None and m2lims is not None):
+                    mass_filter = (primary_mass >= m1lims[0]) & (primary_mass < m1lims[1]) &\
+                        (secondary_mass >= m2lims[0]) & (secondary_mass < m2lims[1])
+                elif (m1lims):
+                    mass_filter = (primary_mass >= m1lims[0]) & (primary_mass < m1lims[1])
+                elif (m2lims):
+                    mass_filter = (secondary_mass >= m2lims[0]) & (secondary_mass < m2lims[1])
+                else:
+                    raise ValueError()
+                systems = systems[mass_filter]
+            
+            t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
+            # get system type for each dco
+            bbh, bhns, bns = self.dco_kstar_filter(systems)
+                
+            # get time bin in which each merging system formed
+            SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, t_centers)
+            frac_SFR_at_t_form: NDArray = frac_SFR[j,SFR_bins_for_systems]
+            
+            # calculate the rest-frame merger rate -- see Dominik et al 2013 Eq. 16/17
+            Rates_intrinsic: NDArray = (\
+                (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
+            
+            N_rest_total += Rates_intrinsic.sum()
+            N_rest_bbh += Rates_intrinsic[bbh].sum()
+            N_rest_bhns += Rates_intrinsic[bhns].sum()
+            N_rest_bns += Rates_intrinsic[bns].sum()
+                
+        # prepare rates integral
+        def rate_integral(n_rest: Quantity) -> Quantity:
+            '''Integrate the rest-frame event rates to obtain a local, observable rate.'''
+            dV_z = 4 * np.pi * (const.c / self.cosmology.H(z_center)) *\
+                np.float_power(self.cosmology.comoving_distance(z_center), 2)
+            #rint(n_rest)
+            #print(dV_z)
+            #print(dz)
+            #print(z_center)
+            return (n_rest * dV_z * (dz/(1 + z_center))).to(u.yr ** -1)
+        
+        N_total = N_rest_total.value
+        N_bbh = N_rest_bbh.value
+        N_bhns = N_rest_bhns.value
+        N_bns = N_rest_bns.value
+        R_total = rate_integral(N_rest_total).value
+        R_bbh = rate_integral(N_rest_bbh).value
+        R_bhns = rate_integral(N_rest_bhns).value
+        R_bns = rate_integral(N_rest_bns).value
+
+        return np.asarray(
+            [t_center, t_i, t_f, z_center, z_i, z_f, N_total,\
+            N_bbh, N_bhns, N_bns, R_total, R_bbh, R_bhns, R_bns], dtype=object)
+    
+
     @staticmethod
     def _get_bins_from_time(t: NDArray | Quantity, time_bins: NDArray) -> NDArray | Quantity:
         '''Return the index of the closest calculated time point from time values.'''
