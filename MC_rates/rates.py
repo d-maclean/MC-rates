@@ -34,7 +34,6 @@ class RatesResult(NamedTuple):
     bns: Quantity
     data: DataFrame
 
-
 class Model:
 
     cache: ClassVar[dict[str,dict[str,Any]]] = {} # cache
@@ -59,7 +58,7 @@ class Model:
             if "/mergers" in store.keys():
                 self.mergers = store.get("mergers")
             else:
-                self.mergers = process_cosmic_models(store.get("bpp"))
+                self.mergers = process_cosmic_models(store.get("bpp")) #type: ignore
             
             self.n_singles: int = store.get("n_singles").values.max()
             self.n_binaries: int = store.get("n_binaries").values.max()
@@ -118,7 +117,7 @@ class MCRates:
         self.cosmology: Cosmology = kwargs.get("cosmology", Planck15)
         self.Zsun: float = kwargs.get("Zsun", 0.017)
         num_pts: int = kwargs.get("num_pts", 1000)
-        self.sfh_method = kwargs.get("sfh_method")
+        self.sfh_method = kwargs.get("sfh_method", "truncnorm")
         if self.sfh_method not in SFH_METHODS:
             raise ValueError(f"Please supply a valid metallicity dispersion method. Valid options are: {[x for x in SFH_METHODS]}")
         logZ_sigma_for_SFH: float = kwargs.get("logZ_sigma", 0.5)
@@ -161,7 +160,8 @@ class MCRates:
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
-        optimistic_ce: bool = kwargs.get("optimistic_ce", True) 
+        optimistic_ce: bool = kwargs.get("optimistic_ce", True)
+        show_tqdm: bool = kwargs.get("tqdm", True)
         
         mass_filter_pri: bool = False
         m_pri_min, m_pri_max = 0, 300
@@ -221,7 +221,8 @@ class MCRates:
             "R_total": np.zeros(shape=n) * self.RATE,
         }
         
-        for i, t_center in enumerate(tqdm(time_bin_centers, desc="Comoving time bins", unit="bins")):
+        for i, t_center in enumerate(
+            tqdm(time_bin_centers, desc="Comoving time bins", unit="bins", disable=not show_tqdm)):
             
             t_i = time_bin_edges[i]
             t_f = time_bin_edges[i+1]
@@ -255,7 +256,7 @@ class MCRates:
                     if "merge_in_ce" not in systems.columns:
                         print("Warning: Can't find `merge_in_ce` column in your data files. Proceeding with optimistic_ce.")
                     else:
-                        systems = systems.loc[~systems.merge_in_ce]
+                        systems = systems.loc[~systems.merge_in_ce] # type: ignore
                 
                 if (mass_filter_pri or mass_filter_sec):
                     component_masses = systems[["mass_1", "mass_2"]].to_numpy()
