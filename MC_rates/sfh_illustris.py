@@ -21,8 +21,10 @@ def illustris_TNG_SFH(comoving_time: NDArray,
     the total star formation to ensure that our (incomplete) metallicity range recovers the total SF
     in the TNG simulation.
     '''
-    assert (np.diff(comoving_time) > 0).all()
-    assert (np.diff(metallicities) > 0).all()
+    if not (np.diff(comoving_time) >= 0).all():
+        raise ValueError("`comoving tim` must be monotonically increasing.")
+    if not (np.diff(metallicities) >= 0).all():
+        raise ValueError("`metallicities` must be monotonically increasing.")
     n_i: int = len(comoving_time)
     n_j: int = len(metallicities)
     VOLUME_FCORR = 100 ** -3
