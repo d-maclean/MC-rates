@@ -253,17 +253,25 @@ class MCRates:
                 binfrac = Zbin.binfrac_model
                 Msim = Zbin.Msim
                 f_corr = Zbin.f_corr
+                systems = Zbin.mergers
+                nk = systems.shape[0]
+
+                t_delay_filter = np.ones(nk, dtype=bool)
+                mass_filter = t_delay_filter.copy()
+                ce_filter = t_delay_filter.copy()
+                q_filter = t_delay_filter.copy()
                 
                 t_delay_filter = \
                     (Zbin.mergers.t_delay.values < \
                     (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
-                systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
+                #systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
 
                 if not optimistic_ce:
                     if "merge_in_ce" not in systems.columns:
                         print("Warning: Can't find `merge_in_ce` column in your data files. Proceeding with optimistic_ce.")
                     else:
-                        systems = systems.loc[~systems.merge_in_ce] # type: ignore
+                        ce_filter = ~systems.merge_in_ce
+                        #systems = systems.loc[~systems.merge_in_ce] # type: ignore
                 
                 component_masses = systems[["mass_1", "mass_2"]].to_numpy()
                 primary_mass: Series = component_masses.max(axis=1)
@@ -278,12 +286,14 @@ class MCRates:
                         mass_filter = (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
                     else:
                         raise ValueError()
-                    systems = systems[mass_filter]
+                    #systems = systems[mass_filter]
                 if do_q_filter:
                     q = (secondary_mass / primary_mass)
                     q_filter = (q >= q_min) & (q <= q_max)
-                    systems = systems[q_filter]
+                    #systems = systems[q_filter]
                 
+                systems = systems[(t_delay_filter) & (mass_filter) & (q_filter) & (ce_filter)]
+
                 t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
                 # get system type for each dco
                 bbh, bhns, bns = self.dco_kstar_filter(systems)
