@@ -91,7 +91,6 @@ class Model:
         kw = kwargs.copy()
         kw["filepath"] = filepath
         return hash(frozenset(kw.items()))
-    
 
     @classmethod
     def load_cosmic_models(cls, files: str | list[str], **kwargs) -> NDArray[Any[Model]]:
@@ -159,6 +158,7 @@ class MCRates:
         '''Calculate dco merger rates per Dominik+2013.'''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
+        q_lims: tuple | None = kwargs.get("q_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
         optimistic_ce: bool = kwargs.get("optimistic_ce", True)
         show_tqdm: bool = kwargs.get("tqdm", True)
@@ -167,6 +167,8 @@ class MCRates:
         m_pri_min, m_pri_max = 0, 300
         mass_filter_sec: bool = False
         m_sec_min, m_sec_max = 0, 300
+        do_q_filter: bool = False
+        q_min, q_max = 0, 1
         Z_filter: bool = False
         Z_min, Z_max = 0e0, 1e0
         
@@ -178,6 +180,10 @@ class MCRates:
             mass_filter_sec = True
             m_sec_min: float = secondary_mass_lims[0]
             m_sec_max: float = secondary_mass_lims[1]
+        if q_lims is not None:
+            do_q_filter = True
+            q_min: float = q_lims[0]
+            q_max: float = q_lims[1]
         if Zlims is not None:
             Z_filter = True
             Z_min: float = Zlims[0]
@@ -199,6 +205,7 @@ class MCRates:
         
         fracSFR_at_bin_centers: NDArray = \
             np.zeros(shape=(n_j, n), dtype=float) * (u.Msun * u.yr ** -1 * u.Mpc ** -3)
+        # SFR at center of each time bin
         for j in range(n_j):
             fracSFR_at_bin_centers[j,:] = \
                 np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
@@ -258,11 +265,10 @@ class MCRates:
                     else:
                         systems = systems.loc[~systems.merge_in_ce] # type: ignore
                 
+                component_masses = systems[["mass_1", "mass_2"]].to_numpy()
+                primary_mass: Series = component_masses.max(axis=1)
+                secondary_mass: Series = component_masses.min(axis=1)
                 if (mass_filter_pri or mass_filter_sec):
-                    component_masses = systems[["mass_1", "mass_2"]].to_numpy()
-                    primary_mass = component_masses.max(axis=1)
-                    secondary_mass = component_masses.min(axis=1)
-                    
                     if (mass_filter_pri and mass_filter_sec):
                         mass_filter = (primary_mass >= m_pri_min) & (primary_mass < m_pri_max) &\
                             (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
@@ -273,6 +279,10 @@ class MCRates:
                     else:
                         raise ValueError()
                     systems = systems[mass_filter]
+                if do_q_filter:
+                    q = (secondary_mass / primary_mass)
+                    q_filter = (q >= q_min) & (q <= q_max)
+                    systems = systems[q_filter]
                 
                 t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
                 # get system type for each dco
