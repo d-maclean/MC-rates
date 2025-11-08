@@ -160,7 +160,7 @@ class MCRates:
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         q_lims: tuple | None = kwargs.get("q_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
-        max_ns: float = kwargs.get("max_ns", 3.0)
+        max_ns: float | None = kwargs.get("max_ns", None)
         optimistic_ce: bool = kwargs.get("optimistic_ce", True)
         show_tqdm: bool = kwargs.get("tqdm", True)
         
@@ -297,8 +297,10 @@ class MCRates:
 
                 t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
                 # get system type for each dco
-                bbh, bhns, bns = self.dco_mass_filter(systems, max_ns=max_ns)
-                #bbh, bhns, bns = self.dco_kstar_filter(systems)
+                if max_ns is None:
+                    bbh, bhns, bns = self.dco_kstar_filter(systems)
+                else:
+                    bbh, bhns, bns = self.dco_mass_filter(systems, max_ns=max_ns)
                 
                 # get time bin in which each merging system formed
                 SFR_bins_for_systems: NDArray = self._get_bins_from_time(t_form, time_bin_centers)
