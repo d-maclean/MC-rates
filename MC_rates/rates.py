@@ -403,28 +403,30 @@ class MCRates:
                 N_rest_bns += Rates_intrinsic[bns].sum()
                 
             # prepare rates integral
-            def rate_integral(n_rest: Quantity) -> Quantity:
+            def rate_integral() -> Quantity:
                 '''Integrate the rest-frame event rates to obtain a local, observable rate.'''
                 dV_z = 4 * np.pi * (const.c / cosmo.H(z_center)) *\
                     np.float_power(cosmo.comoving_distance(z_center), 2)
-                return (n_rest * dV_z * (dz/(1 + z_center))).to(u.yr ** -1)
+                return (dV_z * (dz/(1 + z_center))).to(u.Gpc ** 3)
+            
+            rate_int = rate_integral()
             
             data["N_total"][i] = N_rest_total
             data["N_bbh"][i] = N_rest_bbh
             data["N_bhns"][i] = N_rest_bhns
             data["N_bns"][i] = N_rest_bns
-            data["R_total"][i] = rate_integral(N_rest_total)
-            data["R_bbh"][i] = rate_integral(N_rest_bbh)
-            data["R_bhns"][i] = rate_integral(N_rest_bhns)
-            data["R_bns"][i] = rate_integral(N_rest_bns)
+            data["R_total"][i] = rate_int * N_rest_total
+            data["R_bbh"][i] = rate_int * N_rest_bbh
+            data["R_bhns"][i] = rate_int * N_rest_bhns
+            data["R_bns"][i] = rate_int * N_rest_bns
 
-            if histogram:
-                hist_m1_data["bbh"].append(np.sum(hist_dZ_m1["bbh"], axis=0))
-                hist_m1_data["nsbh"].append(np.sum(hist_dZ_m1["nsbh"], axis=0))
-                hist_m1_data["bns"].append(np.sum(hist_dZ_m1["bns"], axis=0))
-                hist_q_data["bbh"].append(np.sum(hist_dZ_q["bns"], axis=0))
-                hist_q_data["nsbh"].append(np.sum(hist_dZ_q["nsbh"], axis=0))
-                hist_q_data["bns"].append(np.sum(hist_dZ_q["bns"], axis=0))
+            if histogram: # multiply by rate_int factor to account for redshift!
+                hist_m1_data["bbh"].append(rate_int * np.sum(hist_dZ_m1["bbh"], axis=0))
+                hist_m1_data["nsbh"].append(rate_int * np.sum(hist_dZ_m1["nsbh"], axis=0))
+                hist_m1_data["bns"].append(rate_int * np.sum(hist_dZ_m1["bns"], axis=0))
+                hist_q_data["bbh"].append(rate_int * np.sum(hist_dZ_q["bns"], axis=0))
+                hist_q_data["nsbh"].append(rate_int * np.sum(hist_dZ_q["nsbh"], axis=0))
+                hist_q_data["bns"].append(rate_int * np.sum(hist_dZ_q["bns"], axis=0))
         
         output_df: pd.DataFrame = pd.DataFrame(data)
     
@@ -444,12 +446,12 @@ class MCRates:
             _hqnsbh = np.array(hist_q_data["nsbh"], dtype=object)
             _hqbns = np.array(hist_q_data["bns"], dtype=object)
 
-            hist["bbh"] = np.sum(_hbbh[np.nonzero(local_universe)[0]], axis=0).astype(float)
-            hist["nsbh"] = np.sum(_hbhns[np.nonzero(local_universe)[0]], axis=0).astype(float)
-            hist["bns"] = np.sum(_hbns[np.nonzero(local_universe)[0]], axis=0).astype(float)
-            hist["q_bbh"] = np.sum(_hqbbh[np.nonzero(local_universe)[0]], axis=0).astype(float)
-            hist["q_nsbh"] = np.sum(_hqnsbh[np.nonzero(local_universe)[0]], axis=0).astype(float)
-            hist["q_bns"] = np.sum(_hqbns[np.nonzero(local_universe)[0]], axis=0).astype(float)
+            hist["bbh"] = np.sum(_hbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["nsbh"] = np.sum(_hbhns[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["bns"] = np.sum(_hbns[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["q_bbh"] = np.sum(_hqbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["q_nsbh"] = np.sum(_hqnsbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["q_bns"] = np.sum(_hqbns[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
 
             hist["bins_bbh"] = bins_bbh
             hist["bins_nsbh"] = bins_nsbh
