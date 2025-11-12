@@ -33,6 +33,7 @@ class RatesResult(NamedTuple):
     nsbh: Quantity
     bns: Quantity
     data: DataFrame
+    hist: dict
 
 class Model:
 
@@ -114,7 +115,7 @@ class MCRates:
     def __init__(self, t0: Quantity, tf: Quantity, models: str | list[str], **kwargs):
 
         self.cosmology: Cosmology = kwargs.get("cosmology", Planck15)
-        self.Zsun: float = kwargs.get("Zsun", 0.017)
+        self.Zsun: float = kwargs.get("Zsun", 0.014)
         num_pts: int = kwargs.get("num_pts", 1000)
         self.sfh_method = kwargs.get("sfh_method", "truncnorm")
         if self.sfh_method not in SFH_METHODS:
@@ -151,18 +152,72 @@ class MCRates:
         cls.__init__(*args, **kwargs)
         return
 
-    # trying once again
     def calc_merger_rates(self,
                           nbins: int = 200, z_local: float = 0.1,
                           **kwargs) -> RatesResult:
-        '''Calculate dco merger rates per Dominik+2013.'''
+        '''
+        Calculate DCO merger rates per Dominik+2013.
+        
+        ### Parameters
+        `nbins`: the number of equally-spaced covmoving time bins to use. default=`200`
+
+        `z_local`: the cutoff for the 'local' universe, used to calculate cosmological rates. default=`0.1`
+
+        `primary_mass_lims`: cutoff limits for primary mass (Msun)
+
+        `secondary_mass_lims`: cutoff limits for sedcondary mass (Msun)
+
+        `q_lims`: cutoff limits for q (m2/m1)
+
+        `Zlims`: cutoff limits for metallicity (absolute)
+
+        `max_ns`: maximum mass for neutron stars. If not passed, BSE kstars are used instead.
+
+        `optimistic_ce`: whether to allow stars with non-differentiated core/enevelope boundary to survive
+        common envelope. default=`True`
+
+        `histogram`: whether to output histogram data. default=`False`.
+
+        `bins_bbh`: histogram bins for BBHs. default=`10`.
+
+        `bins_nsbh`: histogram bins for NSBHs. default=`10`.
+
+        `bins_bns`: histogram bins for BNSe. default=`10`.
+
+        `bins_q`: histogram bins for q. default=`10`.
+
+        `show_tqdm`: show a progress bar. default=`True`.
+
+        ### Returns
+
+        `RatesResult`: a named tuple containing the following fields:
+            - `total`: sum of all CBCs (yr^-1 Gpc^-3)
+            - `bbh`: BBHs (yr^-1 Gpc^-3)
+            - `nsbh`: NSBHs (yr^-1 Gpc^-3)
+            - `bns`: BNSe (yr^-1 Gpc^-3)
+            - `data`: DataFrame of rates calculations
+            - `hist`: dictionary of histogram data and bins
+        
+        '''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         q_lims: tuple | None = kwargs.get("q_lims", None)
         Zlims: tuple | None = kwargs.get("Zlims", None)
         max_ns: float | None = kwargs.get("max_ns", None)
         optimistic_ce: bool = kwargs.get("optimistic_ce", True)
+        histogram: bool = kwargs.get("histogram", False)
+        bins_bbh: int | NDArray = kwargs.get("bins_bbh", 10) #type: ignore
+        bins_nsbh: int | NDArray = kwargs.get("bins_nsbh", 10) #type: ignore
+        bins_bns: int | NDArray = kwargs.get("bins_bns", 10) #type: ignore
+        bins_q: int | NDArray = kwargs.get("bins_q", 10) # type: ignore
         show_tqdm: bool = kwargs.get("tqdm", True)
+
+        if histogram:
+            _mxns = max_ns if max_ns else 3.0
+            if isinstance(bins_bbh, int): bins_bbh = np.linspace(_mxns, 60.1, bins_bbh)
+            if isinstance(bins_nsbh, int): bins_nsbh = np.linspace(_mxns, 60.1, bins_nsbh)
+            if isinstance(bins_bns, int): bins_bns = np.linspace(1.0, _mxns, bins_bns)
+            if isinstance(bins_q, int): bins_q = np.linspace(0.0, 1.0, bins_q)
         
         mass_filter_pri: bool = False
         m_pri_min, m_pri_max = 0, 300
@@ -228,6 +283,9 @@ class MCRates:
             "R_bns": np.zeros(shape=n) * self.RATE,
             "R_total": np.zeros(shape=n) * self.RATE,
         }
+
+        hist_m1_data = {"bbh": [], "nsbh": [], "bns": []}
+        hist_q_data = {"bbh": [], "nsbh": [], "bns": []}
         
         for i, t_center in enumerate(
             tqdm(time_bin_centers, desc="Comoving time bins", unit="bins", disable=not show_tqdm)):
@@ -244,6 +302,9 @@ class MCRates:
             N_rest_bhns = 0.0 * self.VOLRATE
             N_rest_bns = 0.0 * self.VOLRATE
             
+            hist_dZ_m1 = {"bbh": [], "nsbh": [], "bns": []}
+            hist_dZ_q = {"bbh": [], "nsbh": [], "bns": []}
+
             for j, Zbin in enumerate(self.bins):
                 
                 if Z_filter:
@@ -294,6 +355,7 @@ class MCRates:
                     #systems = systems[q_filter]
                 
                 systems = systems[(t_delay_filter) & (mass_filter) & (q_filter) & (ce_filter)]
+                sys_mass_pri, sys_mass_sec, sys_q = self._calculate_m1_m2_q(systems)
 
                 t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
                 # get system type for each dco
@@ -310,6 +372,31 @@ class MCRates:
                 Rates_intrinsic: NDArray = (\
                     (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
                 
+                if histogram:
+                    # bbh
+                    _hist_bbh, _ = np.histogram(sys_mass_pri[bbh],
+                                                        bins=bins_bbh, weights=(frac_SFR_at_t_form[bbh] / Msim))
+                    # nsbh
+                    _hist_bhns, _ = np.histogram(sys_mass_pri[bhns],
+                                                        bins=bins_nsbh, weights=(frac_SFR_at_t_form[bhns] / Msim))
+                    # bns
+                    _hist_bns, _ = np.histogram(sys_mass_pri[bns],
+                                                        bins=bins_bns, weights=(frac_SFR_at_t_form[bns] / Msim))
+                    # q
+                    _hist_qbbh, _ = np.histogram(sys_q[bbh],
+                                                        bins=bins_q, weights=(frac_SFR_at_t_form[bbh] / Msim))
+                    _hist_qbhns, _ = np.histogram(sys_q[bhns],
+                                                        bins=bins_q, weights=(frac_SFR_at_t_form[bhns] / Msim))
+                    _hist_qbns, _ = np.histogram(sys_q[bns],
+                                                        bins=bins_q, weights=(frac_SFR_at_t_form[bns] / Msim))
+
+                    hist_dZ_m1["bbh"].append(_hist_bbh)
+                    hist_dZ_m1["nsbh"].append(_hist_bhns)
+                    hist_dZ_m1["bns"].append(_hist_bns)
+                    hist_dZ_q["bbh"].append(_hist_qbbh)
+                    hist_dZ_q["nsbh"].append(_hist_qbhns)
+                    hist_dZ_q["bns"].append(_hist_qbns)
+
                 N_rest_total += Rates_intrinsic.sum()
                 N_rest_bbh += Rates_intrinsic[bbh].sum()
                 N_rest_bhns += Rates_intrinsic[bhns].sum()
@@ -330,17 +417,56 @@ class MCRates:
             data["R_bbh"][i] = rate_integral(N_rest_bbh)
             data["R_bhns"][i] = rate_integral(N_rest_bhns)
             data["R_bns"][i] = rate_integral(N_rest_bns)
+
+            if histogram:
+                hist_m1_data["bbh"].append(np.sum(hist_dZ_m1["bbh"], axis=0))
+                hist_m1_data["nsbh"].append(np.sum(hist_dZ_m1["nsbh"], axis=0))
+                hist_m1_data["bns"].append(np.sum(hist_dZ_m1["bns"], axis=0))
+                hist_q_data["bbh"].append(np.sum(hist_dZ_q["bns"], axis=0))
+                hist_q_data["nsbh"].append(np.sum(hist_dZ_q["nsbh"], axis=0))
+                hist_q_data["bns"].append(np.sum(hist_dZ_q["bns"], axis=0))
         
         output_df: pd.DataFrame = pd.DataFrame(data)
     
-        local_universe: pd.Series[bool] = output_df.z_center < z_local
-        R_tot = output_df.R_total.loc[local_universe].sum() / u.yr #* z_local
-        R_bbh = output_df.R_bbh.loc[local_universe].sum() / u.yr #* z_local
-        R_bhns = output_df.R_bhns.loc[local_universe].sum() / u.yr #* z_local
-        R_bns = output_df.R_bns.loc[local_universe].sum() / u.yr #* z_local
+        local_universe = output_df.z_center < z_local
+        local_volume = cosmo.comoving_volume(z_local).to(u.Gpc**3)
+        R_tot = output_df.R_total.loc[local_universe].sum() / (u.yr * local_volume)
+        R_bbh = output_df.R_bbh.loc[local_universe].sum() / (u.yr * local_volume)
+        R_bhns = output_df.R_bhns.loc[local_universe].sum() / (u.yr * local_volume)
+        R_bns = output_df.R_bns.loc[local_universe].sum() / (u.yr * local_volume)
 
-        return RatesResult(R_tot, R_bbh, R_bhns, R_bns, output_df)
+        if histogram:
+            hist = {}
+            _hbbh = np.array(hist_m1_data["bbh"], dtype=object)
+            _hbhns = np.array(hist_m1_data["nsbh"], dtype=object)
+            _hbns = np.array(hist_m1_data["bns"], dtype=object)
+            _hqbbh = np.array(hist_q_data["bbh"], dtype=object)
+            _hqnsbh = np.array(hist_q_data["nsbh"], dtype=object)
+            _hqbns = np.array(hist_q_data["bns"], dtype=object)
+
+            hist["bbh"] = np.sum(_hbbh[np.nonzero(local_universe)[0]], axis=0).astype(float)
+            hist["nsbh"] = np.sum(_hbhns[np.nonzero(local_universe)[0]], axis=0).astype(float)
+            hist["bns"] = np.sum(_hbns[np.nonzero(local_universe)[0]], axis=0).astype(float)
+            hist["q_bbh"] = np.sum(_hqbbh[np.nonzero(local_universe)[0]], axis=0).astype(float)
+            hist["q_nsbh"] = np.sum(_hqnsbh[np.nonzero(local_universe)[0]], axis=0).astype(float)
+            hist["q_bns"] = np.sum(_hqbns[np.nonzero(local_universe)[0]], axis=0).astype(float)
+
+            hist["bins_bbh"] = bins_bbh
+            hist["bins_nsbh"] = bins_nsbh
+            hist["bins_bns"] = bins_bns
+            hist["bins_q"] = bins_q
+        else:
+            hist = {}
+
+        return RatesResult(R_tot, R_bbh, R_bhns, R_bns, output_df, hist)
     
+    @staticmethod
+    def _calculate_m1_m2_q(b: DataFrame) -> tuple:
+        component_masses = b[["mass_1", "mass_2"]].to_numpy()
+        primary_mass = component_masses.max(axis=1)
+        secondary_mass = component_masses.min(axis=1)
+        return primary_mass, secondary_mass, secondary_mass / primary_mass
+
     @staticmethod
     def _get_bins_from_time(t: NDArray | Quantity, time_bins: NDArray) -> NDArray | Quantity:
         '''Return the index of the closest calculated time point from time values.'''
