@@ -308,6 +308,7 @@ class MCRates:
         hist_m1_data = {"bbh": [], "nsbh": [], "bns": []}
         hist_q_data = {"bbh": [], "nsbh": [], "bns": []}
         hist_td_data = {"bbh": [], "nsbh": [], "bns": []}
+        hist_Z_data = {"bbh": [], "nsbh": [], "bns": []}
         
         for i, t_center in enumerate(
             tqdm(time_bin_centers, desc="Comoving time bins", unit="bins", disable=not show_tqdm)):
@@ -324,9 +325,9 @@ class MCRates:
             N_rest_bhns = 0.0 * self.VOLRATE
             N_rest_bns = 0.0 * self.VOLRATE
             
-            hist_dZ_m1 = {"bbh": [], "nsbh": [], "bns": []}
-            hist_dZ_q = {"bbh": [], "nsbh": [], "bns": []}
-            hist_dZ_td = {"bbh": [], "nsbh": [], "bns": []}
+            hist_dt_m1 = {"bbh": [], "nsbh": [], "bns": []}
+            hist_dt_q = {"bbh": [], "nsbh": [], "bns": []}
+            hist_dt_td = {"bbh": [], "nsbh": [], "bns": []}
 
             for j, Zbin in enumerate(self.bins):
                 
@@ -395,6 +396,11 @@ class MCRates:
                 Rates_intrinsic: NDArray = (\
                     (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
                 
+                N_rest_total += Rates_intrinsic.sum()
+                N_rest_bbh += Rates_intrinsic[bbh].sum()
+                N_rest_bhns += Rates_intrinsic[bhns].sum()
+                N_rest_bns += Rates_intrinsic[bns].sum()
+
                 if histogram:
                     # bbh
                     _hist_bbh, _ = np.histogram(sys_mass_pri[bbh],
@@ -405,9 +411,9 @@ class MCRates:
                     # bns
                     _hist_bns, _ = np.histogram(sys_mass_pri[bns],
                                                         bins=bins_bns, weights=(frac_SFR_at_t_form[bns] / Msim))
-                    hist_dZ_m1["bbh"].append(_hist_bbh)
-                    hist_dZ_m1["nsbh"].append(_hist_bhns)
-                    hist_dZ_m1["bns"].append(_hist_bns)
+                    hist_dt_m1["bbh"].append(_hist_bbh)
+                    hist_dt_m1["nsbh"].append(_hist_bhns)
+                    hist_dt_m1["bns"].append(_hist_bns)
                     
                     # q
                     _hist_qbbh, _ = np.histogram(sys_q[bbh],
@@ -416,9 +422,9 @@ class MCRates:
                                                         bins=bins_q, weights=(frac_SFR_at_t_form[bhns] / Msim))
                     _hist_qbns, _ = np.histogram(sys_q[bns],
                                                         bins=bins_q, weights=(frac_SFR_at_t_form[bns] / Msim))
-                    hist_dZ_q["bbh"].append(_hist_qbbh)
-                    hist_dZ_q["nsbh"].append(_hist_qbhns)
-                    hist_dZ_q["bns"].append(_hist_qbns)
+                    hist_dt_q["bbh"].append(_hist_qbbh)
+                    hist_dt_q["nsbh"].append(_hist_qbhns)
+                    hist_dt_q["bns"].append(_hist_qbns)
 
                     # t_delay
                     log_td = np.log10((systems.t_delay.values * u.Myr).to(u.yr).value)
@@ -428,14 +434,9 @@ class MCRates:
                                                         bins=bins_t_delay, weights=(frac_SFR_at_t_form[bhns] / Msim))
                     _hist_tbns, _ = np.histogram(log_td[bns],
                                                         bins=bins_t_delay, weights=(frac_SFR_at_t_form[bns] / Msim))
-                    hist_dZ_td["bbh"].append(_hist_tbbh)
-                    hist_dZ_td["nsbh"].append(_hist_tbhns)
-                    hist_dZ_td["bns"].append(_hist_tbns)
-
-                N_rest_total += Rates_intrinsic.sum()
-                N_rest_bbh += Rates_intrinsic[bbh].sum()
-                N_rest_bhns += Rates_intrinsic[bhns].sum()
-                N_rest_bns += Rates_intrinsic[bns].sum()
+                    hist_dt_td["bbh"].append(_hist_tbbh)
+                    hist_dt_td["nsbh"].append(_hist_tbhns)
+                    hist_dt_td["bns"].append(_hist_tbns)
                 
             # prepare rates integral
             def rate_integral() -> Quantity:
@@ -456,15 +457,15 @@ class MCRates:
             data["R_bns"][i] = rate_int * N_rest_bns
 
             if histogram: # multiply by rate_int factor to account for redshift!
-                hist_m1_data["bbh"].append(rate_int * np.sum(hist_dZ_m1["bbh"], axis=0))
-                hist_m1_data["nsbh"].append(rate_int * np.sum(hist_dZ_m1["nsbh"], axis=0))
-                hist_m1_data["bns"].append(rate_int * np.sum(hist_dZ_m1["bns"], axis=0))
-                hist_q_data["bbh"].append(rate_int * np.sum(hist_dZ_q["bns"], axis=0))
-                hist_q_data["nsbh"].append(rate_int * np.sum(hist_dZ_q["nsbh"], axis=0))
-                hist_q_data["bns"].append(rate_int * np.sum(hist_dZ_q["bns"], axis=0))
-                hist_td_data["bbh"].append(rate_int * np.sum(hist_dZ_td["bbh"], axis=0))
-                hist_td_data["nsbh"].append(rate_int * np.sum(hist_dZ_td["nsbh"], axis=0))
-                hist_td_data["bns"].append(rate_int * np.sum(hist_dZ_td["bns"], axis=0))
+                hist_m1_data["bbh"].append(rate_int * np.sum(hist_dt_m1["bbh"], axis=0))
+                hist_m1_data["nsbh"].append(rate_int * np.sum(hist_dt_m1["nsbh"], axis=0))
+                hist_m1_data["bns"].append(rate_int * np.sum(hist_dt_m1["bns"], axis=0))
+                hist_q_data["bbh"].append(rate_int * np.sum(hist_dt_q["bns"], axis=0))
+                hist_q_data["nsbh"].append(rate_int * np.sum(hist_dt_q["nsbh"], axis=0))
+                hist_q_data["bns"].append(rate_int * np.sum(hist_dt_q["bns"], axis=0))
+                hist_td_data["bbh"].append(rate_int * np.sum(hist_dt_td["bbh"], axis=0))
+                hist_td_data["nsbh"].append(rate_int * np.sum(hist_dt_td["nsbh"], axis=0))
+                hist_td_data["bns"].append(rate_int * np.sum(hist_dt_td["bns"], axis=0))
         
         output_df: pd.DataFrame = pd.DataFrame(data)
     
