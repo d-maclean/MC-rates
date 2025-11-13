@@ -5,7 +5,6 @@ from glob import glob
 import numpy as np
 from astropy import units as u, constants as const
 from astropy.cosmology import Cosmology, Planck15, z_at_value
-from dataclasses import dataclass
 import pandas as pd
 from tqdm import tqdm
 from numpy.typing import NDArray
@@ -28,6 +27,23 @@ SFH_METHODS = {
 
 
 class RatesResult(NamedTuple):
+    '''
+    Nmaed tuple containing rates output. Local rates are reported in yr^-1 Gpc^-3.
+
+    ### Fields
+
+    `total`: the total local rate of CBCs
+
+    `bbh`: the local binary black hole rate
+
+    `nsbh`: the local neutron star/black hole rate
+
+    `bns`: the local binary neutron star rate
+
+    `data`: a DataFrame of binned rest-frame rates for each comoving time bin
+
+    `hist`: histogram data and bins
+    '''
     total: Quantity
     bbh: Quantity
     nsbh: Quantity
