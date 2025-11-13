@@ -186,6 +186,8 @@ class MCRates:
 
         `bins_q`: histogram bins for q. default=`10`.
 
+        `bins_t_delay`: histogram bins for delay time. delay times are reported in log scale. default=`10`.
+
         `show_tqdm`: show a progress bar. default=`True`.
 
         ### Returns
@@ -210,7 +212,12 @@ class MCRates:
         bins_nsbh: int | NDArray = kwargs.get("bins_nsbh", 10) #type: ignore
         bins_bns: int | NDArray = kwargs.get("bins_bns", 10) #type: ignore
         bins_q: int | NDArray = kwargs.get("bins_q", 10) # type: ignore
+        bins_t_delay: int | NDArray = kwargs.get("bins_t_delay", 10) # type: ignore
         show_tqdm: bool = kwargs.get("tqdm", True)
+
+        n: int = nbins
+        n_j: int = self.bins.shape[0]
+        cosmo: Cosmology = self.cosmology
 
         if histogram:
             _mxns = max_ns if max_ns else 3.0
@@ -218,6 +225,8 @@ class MCRates:
             if isinstance(bins_nsbh, int): bins_nsbh = np.linspace(_mxns, 60.1, bins_nsbh)
             if isinstance(bins_bns, int): bins_bns = np.linspace(1.0, _mxns, bins_bns)
             if isinstance(bins_q, int): bins_q = np.linspace(0.0, 1.0, bins_q)
+            if isinstance(bins_t_delay, int):\
+                bins_t_delay = np.linspace(0.0, np.log10(cosmo.age(0).to(u.yr).value), bins_t_delay)
         
         mass_filter_pri: bool = False
         m_pri_min, m_pri_max = 0, 300
@@ -244,10 +253,6 @@ class MCRates:
             Z_filter = True
             Z_min: float = Zlims[0]
             Z_max: float = Zlims[1]
-        
-        n: int = nbins
-        n_j: int = self.bins.shape[0]
-        cosmo: Cosmology = self.cosmology
 
         t_i: Quantity = self.comoving_time[0]
         t_f: Quantity = self.comoving_time[-1]
@@ -286,6 +291,7 @@ class MCRates:
 
         hist_m1_data = {"bbh": [], "nsbh": [], "bns": []}
         hist_q_data = {"bbh": [], "nsbh": [], "bns": []}
+        hist_td_data = {"bbh": [], "nsbh": [], "bns": []}
         
         for i, t_center in enumerate(
             tqdm(time_bin_centers, desc="Comoving time bins", unit="bins", disable=not show_tqdm)):
@@ -304,6 +310,7 @@ class MCRates:
             
             hist_dZ_m1 = {"bbh": [], "nsbh": [], "bns": []}
             hist_dZ_q = {"bbh": [], "nsbh": [], "bns": []}
+            hist_dZ_td = {"bbh": [], "nsbh": [], "bns": []}
 
             for j, Zbin in enumerate(self.bins):
                 
@@ -382,6 +389,10 @@ class MCRates:
                     # bns
                     _hist_bns, _ = np.histogram(sys_mass_pri[bns],
                                                         bins=bins_bns, weights=(frac_SFR_at_t_form[bns] / Msim))
+                    hist_dZ_m1["bbh"].append(_hist_bbh)
+                    hist_dZ_m1["nsbh"].append(_hist_bhns)
+                    hist_dZ_m1["bns"].append(_hist_bns)
+                    
                     # q
                     _hist_qbbh, _ = np.histogram(sys_q[bbh],
                                                         bins=bins_q, weights=(frac_SFR_at_t_form[bbh] / Msim))
@@ -389,13 +400,21 @@ class MCRates:
                                                         bins=bins_q, weights=(frac_SFR_at_t_form[bhns] / Msim))
                     _hist_qbns, _ = np.histogram(sys_q[bns],
                                                         bins=bins_q, weights=(frac_SFR_at_t_form[bns] / Msim))
-
-                    hist_dZ_m1["bbh"].append(_hist_bbh)
-                    hist_dZ_m1["nsbh"].append(_hist_bhns)
-                    hist_dZ_m1["bns"].append(_hist_bns)
                     hist_dZ_q["bbh"].append(_hist_qbbh)
                     hist_dZ_q["nsbh"].append(_hist_qbhns)
                     hist_dZ_q["bns"].append(_hist_qbns)
+
+                    # t_delay
+                    log_td = np.log10((systems.t_delay.values * u.Myr).to(u.yr).value)
+                    _hist_tbbh, _ = np.histogram(log_td[bbh],
+                                                        bins=bins_t_delay, weights=(frac_SFR_at_t_form[bbh] / Msim))
+                    _hist_tbhns, _ = np.histogram(log_td[bhns],
+                                                        bins=bins_t_delay, weights=(frac_SFR_at_t_form[bhns] / Msim))
+                    _hist_tbns, _ = np.histogram(log_td[bns],
+                                                        bins=bins_t_delay, weights=(frac_SFR_at_t_form[bns] / Msim))
+                    hist_dZ_td["bbh"].append(_hist_tbbh)
+                    hist_dZ_td["nsbh"].append(_hist_tbhns)
+                    hist_dZ_td["bns"].append(_hist_tbns)
 
                 N_rest_total += Rates_intrinsic.sum()
                 N_rest_bbh += Rates_intrinsic[bbh].sum()
@@ -427,6 +446,9 @@ class MCRates:
                 hist_q_data["bbh"].append(rate_int * np.sum(hist_dZ_q["bns"], axis=0))
                 hist_q_data["nsbh"].append(rate_int * np.sum(hist_dZ_q["nsbh"], axis=0))
                 hist_q_data["bns"].append(rate_int * np.sum(hist_dZ_q["bns"], axis=0))
+                hist_td_data["bbh"].append(rate_int * np.sum(hist_dZ_td["bbh"], axis=0))
+                hist_td_data["nsbh"].append(rate_int * np.sum(hist_dZ_td["nsbh"], axis=0))
+                hist_td_data["bns"].append(rate_int * np.sum(hist_dZ_td["bns"], axis=0))
         
         output_df: pd.DataFrame = pd.DataFrame(data)
     
@@ -445,6 +467,9 @@ class MCRates:
             _hqbbh = np.array(hist_q_data["bbh"], dtype=object)
             _hqnsbh = np.array(hist_q_data["nsbh"], dtype=object)
             _hqbns = np.array(hist_q_data["bns"], dtype=object)
+            _htbbh = np.array(hist_td_data["bbh"], dtype=object)
+            _htnsbh = np.array(hist_td_data["nsbh"], dtype=object)
+            _htbns = np.array(hist_td_data["bns"], dtype=object)
 
             hist["bbh"] = np.sum(_hbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
             hist["nsbh"] = np.sum(_hbhns[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
@@ -452,11 +477,15 @@ class MCRates:
             hist["q_bbh"] = np.sum(_hqbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
             hist["q_nsbh"] = np.sum(_hqnsbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
             hist["q_bns"] = np.sum(_hqbns[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["td_bbh"] = np.sum(_htbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["td_nsbh"] = np.sum(_htnsbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
+            hist["td_bns"] = np.sum(_htbns[np.nonzero(local_universe)[0]], axis=0).astype(float) * 1e9
 
             hist["bins_bbh"] = bins_bbh
             hist["bins_nsbh"] = bins_nsbh
             hist["bins_bns"] = bins_bns
             hist["bins_q"] = bins_q
+            hist["bins_t_delay"] = bins_t_delay
         else:
             hist = {}
 
