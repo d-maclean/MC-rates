@@ -237,14 +237,13 @@ class MCRates:
         n_j: int = self.bins.shape[0]
         cosmo: Cosmology = self.cosmology
 
-        if histogram:
-            _mxns = max_ns if max_ns else 3.0
-            if isinstance(bins_bbh, int): bins_bbh = np.linspace(_mxns, 60.1, bins_bbh)
-            if isinstance(bins_nsbh, int): bins_nsbh = np.linspace(_mxns, 60.1, bins_nsbh)
-            if isinstance(bins_bns, int): bins_bns = np.linspace(1.0, _mxns, bins_bns)
-            if isinstance(bins_q, int): bins_q = np.linspace(0.0, 1.0, bins_q)
-            if isinstance(bins_t_delay, int):\
-                bins_t_delay = np.linspace(0.0, np.log10(cosmo.age(0).to(u.yr).value), bins_t_delay)
+        _mxns = max_ns if max_ns else 3.0
+        if isinstance(bins_bbh, int): bins_bbh = np.linspace(_mxns, 60.1, bins_bbh)
+        if isinstance(bins_nsbh, int): bins_nsbh = np.linspace(_mxns, 60.1, bins_nsbh)
+        if isinstance(bins_bns, int): bins_bns = np.linspace(1.0, _mxns, bins_bns)
+        if isinstance(bins_q, int): bins_q = np.linspace(0.0, 1.0, bins_q)
+        if isinstance(bins_t_delay, int):\
+            bins_t_delay = np.linspace(0.0, np.log10(cosmo.age(0).to(u.yr).value), bins_t_delay)
         
         mass_filter_pri: bool = False
         m_pri_min, m_pri_max = 0, 300
