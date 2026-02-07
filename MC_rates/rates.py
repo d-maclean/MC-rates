@@ -10,20 +10,15 @@ from tqdm import tqdm
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 from astropy.units import Quantity
+import xarray as xr
 
 from typing import ClassVar, NamedTuple, Any
+from xarray import Dataset
 
 from rates_functions import process_cosmic_models
 from sfh_madau_fragos import madau_fragos_SFH
 from sfh_chruslinska_nelemans import chr_nel_SFH
 from sfh_illustris import illustris_TNG_SFH
-
-SFH_METHODS = {
-    "lognorm",
-    "truncnorm",
-    "illustris",
-    "chruslinska19"
-    }
 
 
 class RatesResult(NamedTuple):
@@ -40,16 +35,20 @@ class RatesResult(NamedTuple):
 
     `bns`: the local binary neutron star rate
 
-    `data`: a DataFrame of binned rest-frame rates for each comoving time bin
-
-    `hist`: histogram data and bins
+    `data`: a Dataset of per-binary information for each metallicity and time bin
     '''
     total: Quantity
     bbh: Quantity
     nsbh: Quantity
     bns: Quantity
-    data: DataFrame
-    hist: dict
+    data: Dataset
+
+SFH_METHODS = {
+    "lognorm",
+    "truncnorm",
+    "illustris",
+    "chruslinska19"
+    }
 
 class Model:
 
@@ -127,8 +126,6 @@ class MCRates:
 
     RATE: ClassVar[Quantity] =  u.yr ** -1
     VOLRATE: ClassVar[Quantity] = u.yr ** -1 * u.Gpc ** -3
-    HISTOGRAMS: ClassVar[tuple] = \
-        ("m1_bbh", "m1_nsbh", "m1_bns", "q_bbh", "q_nsbh", "q_bns", "td_bbh", "td_nsbh", "td_bns")
 
     def __init__(self, t0: Quantity, tf: Quantity, models: str | list[str], **kwargs):
 
@@ -194,17 +191,7 @@ class MCRates:
         `optimistic_ce`: whether to allow stars with non-differentiated core/enevelope boundary to survive
         common envelope. default=`True`
 
-        `histogram`: whether to output histogram data. default=`False`.
-
-        `bins_bbh`: histogram bins for BBHs. default=`10`.
-
-        `bins_nsbh`: histogram bins for NSBHs. default=`10`.
-
-        `bins_bns`: histogram bins for BNSe. default=`10`.
-
-        `bins_q`: histogram bins for q. default=`10`.
-
-        `bins_t_delay`: histogram bins for delay time. delay times are reported in log scale. default=`10`.
+        `verbose`: whether to output individual rates for each monte-carlo data point
 
         `show_tqdm`: show a progress bar. default=`True`.
 
@@ -216,7 +203,7 @@ class MCRates:
             - `nsbh`: NSBHs (yr^-1 Gpc^-3)
             - `bns`: BNSe (yr^-1 Gpc^-3)
             - `data`: DataFrame of rates calculations
-            - `hist`: dictionary of histogram data and bins
+            - `verbose_data`: DataFrame of detailed rates info
         
         '''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
@@ -225,25 +212,12 @@ class MCRates:
         Zlims: tuple | None = kwargs.get("Zlims", None)
         max_ns: float | None = kwargs.get("max_ns", None)
         optimistic_ce: bool = kwargs.get("optimistic_ce", True)
-        histogram: bool = kwargs.get("histogram", False)
-        bins_bbh: int | NDArray = kwargs.get("bins_bbh", 10) #type: ignore
-        bins_nsbh: int | NDArray = kwargs.get("bins_nsbh", 10) #type: ignore
-        bins_bns: int | NDArray = kwargs.get("bins_bns", 10) #type: ignore
-        bins_q: int | NDArray = kwargs.get("bins_q", 10) # type: ignore
-        bins_t_delay: int | NDArray = kwargs.get("bins_t_delay", 10) # type: ignore
+        verbose: bool = kwargs.get("verbose", False)
         show_tqdm: bool = kwargs.get("tqdm", True)
 
         n: int = nbins
         n_j: int = self.bins.shape[0]
         cosmo: Cosmology = self.cosmology
-
-        _mxns = max_ns if max_ns else 3.0
-        if isinstance(bins_bbh, int): bins_bbh = np.linspace(_mxns, 60.1, bins_bbh)
-        if isinstance(bins_nsbh, int): bins_nsbh = np.linspace(_mxns, 60.1, bins_nsbh)
-        if isinstance(bins_bns, int): bins_bns = np.linspace(1.0, _mxns, bins_bns)
-        if isinstance(bins_q, int): bins_q = np.linspace(0.0, 1.0, bins_q)
-        if isinstance(bins_t_delay, int):\
-            bins_t_delay = np.linspace(0.0, np.log10(cosmo.age(0).to(u.yr).value), bins_t_delay)
         
         mass_filter_pri: bool = False
         m_pri_min, m_pri_max = 0, 300
@@ -287,37 +261,45 @@ class MCRates:
         for j in range(n_j):
             fracSFR_at_bin_centers[j,:] = \
                 np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
-                
-        data: dict[str,NDArray] = {
-            "t_center": time_bin_centers.to(u.Myr),
-            "t_i": time_bin_edges[:-1].to(u.Myr),
-            "t_f": time_bin_edges[1:].to(u.Myr),
-            "z_center": z_at_centers,
-            "z_i": z_at_edges[:-1],
-            "z_f": z_at_edges[1:],
-            "E_z": E_z_at_centers,
-            "N_bbh": np.zeros(shape=n) * self.VOLRATE,
-            "N_bhns": np.zeros(shape=n) * self.VOLRATE,
-            "N_bns": np.zeros(shape=n) * self.VOLRATE,
-            "N_total": np.zeros(shape=n) * self.VOLRATE,
-            "R_bbh": np.zeros(shape=n) * self.RATE,
-            "R_bhns": np.zeros(shape=n) * self.RATE,
-            "R_bns": np.zeros(shape=n) * self.RATE,
-            "R_total": np.zeros(shape=n) * self.RATE,
-        }
 
-        hist_data = dict(
-            m1_bbh=np.zeros((n, len(bins_bbh)-1)),
-            m1_nsbh=np.zeros((n, len(bins_nsbh)-1)),
-            m1_bns=np.zeros((n, len(bins_bns)-1)),
-            q_bbh=np.zeros((n, len(bins_q)-1)),
-            q_nsbh=np.zeros((n, len(bins_q)-1)),
-            q_bns=np.zeros((n, len(bins_q)-1)),
-            td_bbh=np.zeros((n, len(bins_t_delay)-1)),
-            td_nsbh=np.zeros((n, len(bins_t_delay)-1)),
-            td_bns=np.zeros((n, len(bins_t_delay)-1)),
+        '''   
+        data = dict( # edges of bins
+            t_i = time_bin_edges[:-1].to(u.Myr),
+            t_f = time_bin_edges[1:].to(u.Myr),
+            z_i = z_at_edges[:-1],
+            z_f = z_at_edges[1:],
+        )'''
+
+        n_binaries_per_j = np.array([x.mergers.shape[0] for x in self.bins])
+        total_n_binaries = np.sum(n_binaries_per_j)
+        data = dict(
+            # info on comoving time bins
+            time_bins = np.arange(0, n),
+            t_center = time_bin_centers,
+            z_center = z_at_centers,
+            E_z = E_z_at_centers,
+            is_local = np.zeros(n, dtype=bool),
+            # info on binaries
+            indices = np.arange(total_n_binaries),
+            metallicity = np.repeat(self.metallicities, [x.mergers.shape[0] for x in self.bins]),
+            bin_nums = np.concat([x.mergers.bin_num.unique() for x in self.bins]),
+            m1 = np.concat([self._calculate_m1_m2_q(x.mergers)[0] for x in self.bins]),
+            m2 = np.concat([self._calculate_m1_m2_q(x.mergers)[1] for x in self.bins]),
+            q = np.concat([self._calculate_m1_m2_q(x.mergers)[2] for x in self.bins]),
+            t_delay = np.concat([x.mergers.t_delay for x in self.bins]),
+            rest_frame_rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
+            rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
+            # rates per time bin
+            N_bbh = np.zeros(shape=n) * self.VOLRATE,
+            N_bhns = np.zeros(shape=n) * self.VOLRATE,
+            N_bns = np.zeros(shape=n) * self.VOLRATE,
+            N_total = np.zeros(shape=n) * self.VOLRATE,
+            R_bbh = np.zeros(shape=n) * self.RATE,
+            R_bhns = np.zeros(shape=n) * self.RATE,
+            R_bns = np.zeros(shape=n) * self.RATE,
+            R_total= np.zeros(shape=n) * self.RATE,
         )
-        
+
         for i, t_center in enumerate(
             tqdm(time_bin_centers, desc="Comoving time bins", unit="bins", disable=not show_tqdm)):
             
@@ -332,18 +314,6 @@ class MCRates:
             N_rest_bbh = 0.0 * self.VOLRATE
             N_rest_bhns = 0.0 * self.VOLRATE
             N_rest_bns = 0.0 * self.VOLRATE
-            
-            hist_data_i = dict(
-                m1_bbh=np.zeros((n_j, len(bins_bbh)-1)),
-                m1_nsbh=np.zeros((n_j, len(bins_nsbh)-1)),
-                m1_bns=np.zeros((n_j, len(bins_bns)-1)),
-                q_bbh=np.zeros((n_j, len(bins_q)-1)),
-                q_nsbh=np.zeros((n_j, len(bins_q)-1)),
-                q_bns=np.zeros((n_j, len(bins_q)-1)),
-                td_bbh=np.zeros((n_j, len(bins_t_delay)-1)),
-                td_nsbh=np.zeros((n_j, len(bins_t_delay)-1)),
-                td_bns=np.zeros((n_j, len(bins_t_delay)-1)),
-            )
 
             for j, Zbin in enumerate(self.bins):
                 
@@ -358,6 +328,8 @@ class MCRates:
                 systems = Zbin.mergers
                 nk = systems.shape[0]
 
+                primary_mass, secondary_mass, q = self._calculate_m1_m2_q(systems)
+
                 t_delay_filter = np.ones(nk, dtype=bool)
                 mass_filter = t_delay_filter.copy()
                 ce_filter = t_delay_filter.copy()
@@ -366,18 +338,12 @@ class MCRates:
                 t_delay_filter = \
                     (Zbin.mergers.t_delay.values < \
                     (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
-                #systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
 
                 if not optimistic_ce:
                     if "merge_in_ce" not in systems.columns:
                         print("Warning: Can't find `merge_in_ce` column in your data files. Proceeding with optimistic_ce.")
                     else:
                         ce_filter = ~systems.merge_in_ce
-                        #systems = systems.loc[~systems.merge_in_ce] # type: ignore
-                
-                component_masses = systems[["mass_1", "mass_2"]].to_numpy()
-                primary_mass: Series = component_masses.max(axis=1)
-                secondary_mass: Series = component_masses.min(axis=1)
                 if (mass_filter_pri or mass_filter_sec):
                     if (mass_filter_pri and mass_filter_sec):
                         mass_filter = (primary_mass >= m_pri_min) & (primary_mass < m_pri_max) &\
@@ -388,16 +354,14 @@ class MCRates:
                         mass_filter = (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
                     else:
                         raise ValueError()
-                    #systems = systems[mass_filter]
                 if do_q_filter:
                     q = (secondary_mass / primary_mass)
                     q_filter = (q >= q_min) & (q <= q_max)
-                    #systems = systems[q_filter]
                 
-                systems = systems[(t_delay_filter) & (mass_filter) & (q_filter) & (ce_filter)]
-                sys_mass_pri, sys_mass_sec, sys_q = self._calculate_m1_m2_q(systems)
+                merging_filter = (t_delay_filter) & (mass_filter) & (q_filter) & (ce_filter)
+                merging_systems = systems[merging_filter]
+                t_form: NDArray = (t_center - merging_systems.t_delay.values * u.Myr).to(u.Myr)
 
-                t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
                 # get system type for each dco
                 if max_ns is None:
                     bbh, bhns, bns = self.dco_kstar_filter(systems)
@@ -413,134 +377,78 @@ class MCRates:
                     (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
                 
                 N_rest_total += Rates_intrinsic.sum()
-                N_rest_bbh += Rates_intrinsic[bbh].sum()
-                N_rest_bhns += Rates_intrinsic[bhns].sum()
-                N_rest_bns += Rates_intrinsic[bns].sum()
-
-                if histogram:
-                    hist_arrays = \
-                        self._calculate_histograms(
-                            sys_mass_pri, sys_q, systems.t_delay,
-                            bbh=bbh, bhns=bhns, bns=bns, weights=frac_SFR_at_t_form,
-                            bins_bbh=bins_bbh, bins_nsbh=bins_nsbh, bins_bns=bins_bns,
-                            bins_q=bins_q, bins_td=bins_t_delay)
-                    
-                    for k, key in enumerate(self.HISTOGRAMS):
-                        hist_data_i[key][j,:] = hist_arrays[k]
+                N_rest_bbh += Rates_intrinsic[bbh[merging_filter]].sum()
+                N_rest_bhns += Rates_intrinsic[bhns[merging_filter]].sum()
+                N_rest_bns += Rates_intrinsic[bns[merging_filter]].sum()
+                
+                rate_per_system = np.zeros(nk) * self.VOLRATE
+                rate_per_system[merging_filter] = Rates_intrinsic
+                data["rest_frame_rates"][j][:,i] = rate_per_system
 
             # prepare rates integral
-            def rate_integral() -> Quantity:
+            def cosmological_rate_integral() -> Quantity:
                 '''Integrate the rest-frame event rates to obtain a local, observable rate.'''
                 dV_z = 4 * np.pi * (const.c / cosmo.H(z_center)) *\
                     np.float_power(cosmo.comoving_distance(z_center), 2)
                 return (dV_z * (dz/(1 + z_center))).to(u.Gpc ** 3)
-            
-            rate_int = rate_integral()
+            rate_integral = cosmological_rate_integral()
             
             data["N_total"][i] = N_rest_total
             data["N_bbh"][i] = N_rest_bbh
             data["N_bhns"][i] = N_rest_bhns
             data["N_bns"][i] = N_rest_bns
-            data["R_total"][i] = rate_int * N_rest_total
-            data["R_bbh"][i] = rate_int * N_rest_bbh
-            data["R_bhns"][i] = rate_int * N_rest_bhns
-            data["R_bns"][i] = rate_int * N_rest_bns
+            data["R_total"][i] = rate_integral * N_rest_total
+            data["R_bbh"][i] = rate_integral * N_rest_bbh
+            data["R_bhns"][i] = rate_integral * N_rest_bhns
+            data["R_bns"][i] = rate_integral * N_rest_bns
 
-            if histogram: # multiply by rate_int factor to account for redshift!
-                for k, key in enumerate(self.HISTOGRAMS):
-                    hist_data[key][i,:] = rate_int * np.sum(hist_data_i[key], axis=0) 
+            for j in range(n_j):
+                data["rates"][j][:,i] = \
+                    data["rest_frame_rates"][j][:,i] * rate_integral
 
-                '''
-                hist_m1_data["bbh"].append(rate_int * np.sum(hist_dt_m1["bbh"], axis=0))
-                hist_m1_data["nsbh"].append(rate_int * np.sum(hist_dt_m1["nsbh"], axis=0))
-                hist_m1_data["bns"].append(rate_int * np.sum(hist_dt_m1["bns"], axis=0))
-                hist_q_data["bbh"].append(rate_int * np.sum(hist_dt_q["bbh"], axis=0))
-                hist_q_data["nsbh"].append(rate_int * np.sum(hist_dt_q["nsbh"], axis=0))
-                hist_q_data["bns"].append(rate_int * np.sum(hist_dt_q["bns"], axis=0))
-                hist_td_data["bbh"].append(rate_int * np.sum(hist_dt_td["bbh"], axis=0))
-                hist_td_data["nsbh"].append(rate_int * np.sum(hist_dt_td["nsbh"], axis=0))
-                hist_td_data["bns"].append(rate_int * np.sum(hist_dt_td["bns"], axis=0))
-                '''
-        
-        output_df: pd.DataFrame = pd.DataFrame(data)
-    
-        local_universe = output_df.z_center < z_local
-        local_volume = cosmo.comoving_volume(z_local).to(u.Gpc**3)
-        R_tot = output_df.R_total.loc[local_universe].sum() / (u.yr * local_volume)
-        R_bbh = output_df.R_bbh.loc[local_universe].sum() / (u.yr * local_volume)
-        R_bhns = output_df.R_bhns.loc[local_universe].sum() / (u.yr * local_volume)
-        R_bns = output_df.R_bns.loc[local_universe].sum() / (u.yr * local_volume)
+        #output_df: pd.DataFrame = pd.DataFrame(data)
+        local_universe = z_at_centers < z_local
+        local_volume = cosmo.comoving_volume(z_local).to(u.Gpc**3)        
 
-        hist = {}
-        if histogram:
-            local_bins = np.nonzero(local_universe)[0]
-            hist["bins_bbh"] = bins_bbh
-            hist["bins_nsbh"] = bins_nsbh
-            hist["bins_bns"] = bins_bns
-            hist["bins_q"] = bins_q
-            hist["bins_td"] = bins_t_delay
-            for k, key in enumerate(self.HISTOGRAMS):
-                _hist = np.sum(hist_data[key][local_bins], axis=0)
-                normalized_hist = _hist/_hist.sum()
-                hist[key] = normalized_hist
+        data["rest_frame_rates"] = np.concat(data["rest_frame_rates"], axis=0)
+        data["rates"] = np.concat(data["rates"], axis=0)
 
-            '''
-            hist = {}
-            _hbbh = np.array(hist_m1_data["bbh"], dtype=object)
-            _hbbh = (_hbbh * np.diff(bins_bbh)) / _hbbh.sum()
-            _hbhns = np.array(hist_m1_data["nsbh"], dtype=object)
-            _hbhns = 
-            _hbns = np.array(hist_m1_data["bns"], dtype=object)
-            _hqbbh = np.array(hist_q_data["bbh"], dtype=object)
-            _hqnsbh = np.array(hist_q_data["nsbh"], dtype=object)
-            _hqbns = np.array(hist_q_data["bns"], dtype=object)
-            _htbbh = np.array(hist_td_data["bbh"], dtype=object)
-            _htnsbh = np.array(hist_td_data["nsbh"], dtype=object)
-            _htbns = np.array(hist_td_data["bns"], dtype=object)
+        dataset = xr.Dataset(
+            data_vars = {
+                "metallicity": (["indices"], data["metallicity"]),
+                "bin_num": (["indices"], data["bin_nums"]),
+                "m1": (["indices"], data["m1"]),
+                "m2": (["indices"], data["m2"]),
+                "q": (["indices"], data["q"]),
+                "t_delay": (["indices"], data["t_delay"]),
+                "rates": (["indices", "comoving_time"], data["rates"]),
+                "rest_frame_rates": (["indices", "comoving_time"], data["rest_frame_rates"]),
+                # time bin info
+                "is_local": (["comoving_time"], local_universe),
+                "E_z": (["comoving_time"], data["E_z"]),
+                "N_bbh": (["comoving_time"], data["N_bbh"]),
+                "N_bhns": (["comoving_time"], data["N_bhns"]),
+                "N_bns": (["comoving_time"], data["N_bns"]),
+                "N_total": (["comoving_time"], data["N_total"]),
+                "R_bbh": (["comoving_time"], data["R_bbh"]),
+                "R_bhns": (["comoving_time"], data["R_bhns"]),
+                "R_bns": (["comoving_time"], data["R_bns"]),
+                "R_total": (["comoving_time"], data["R_total"]),
+            },
+            coords = {
+                "indices": (["indices"], data["indices"]),
+                "comoving_time": (["comoving_time"], data["time_bins"]),
+                "redshift": (["comoving_time"], z_at_centers)
+            },
+        )
 
-            hist["bbh"] = np.sum(_hbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bbh
-            hist["nsbh"] = np.sum(_hbhns[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bhns
-            hist["bns"] = np.sum(_hbns[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bns
-            hist["q_bbh"] = np.sum(_hqbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bbh
-            hist["q_nsbh"] = np.sum(_hqnsbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bhns
-            hist["q_bns"] = np.sum(_hqbns[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bns
-            hist["td_bbh"] = np.sum(_htbbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bbh
-            hist["td_nsbh"] = np.sum(_htnsbh[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bhns
-            hist["td_bns"] = np.sum(_htbns[np.nonzero(local_universe)[0]], axis=0).astype(float) * R_bns
+        R_tot = dataset.R_total[local_universe].sum().data / local_volume
+        R_bbh = dataset.R_bbh[local_universe].sum().data / local_volume
+        R_bhns = dataset.R_bhns[local_universe].sum().data / local_volume
+        R_bns = dataset.R_bns[local_universe].sum().data / local_volume
 
-            hist["bins_bbh"] = bins_bbh
-            hist["bins_nsbh"] = bins_nsbh
-            hist["bins_bns"] = bins_bns
-            hist["bins_q"] = bins_q
-            hist["bins_t_delay"] = bins_t_delay
-        else:
-            hist = {}
-            '''
+        return RatesResult(R_tot, R_bbh, R_bhns, R_bns, dataset)
 
-        return RatesResult(R_tot, R_bbh, R_bhns, R_bns, output_df, hist)
-    
-    @staticmethod
-    def _calculate_histograms(m1, q, td, bbh, bhns, bns, weights,
-                              bins_bbh, bins_nsbh, bins_bns, bins_q, bins_td) -> tuple:
-        '''Just histograms...'''
-        # m1
-        m1_bbh, _ = np.histogram(m1[bbh], weights=weights[bbh], bins=bins_bbh)
-        m1_nsbh, _ = np.histogram(m1[bhns], weights=weights[bhns], bins=bins_nsbh)
-        m1_bns, _ = np.histogram(m1[bns], weights=weights[bns], bins=bins_bns)
-
-        # q
-        q_bbh, _ = np.histogram(q[bbh], weights=weights[bbh], bins=bins_q)
-        q_nsbh, _ = np.histogram(q[bhns], weights=weights[bhns], bins=bins_q)
-        q_bns, _ = np.histogram(q[bns], weights=weights[bns], bins=bins_q)
-
-        # delay time
-        log_td = np.log10((td.values * u.Myr).to(u.yr).value)
-        td_bbh, _ = np.histogram(log_td[bbh], weights=weights[bbh], bins=bins_td)
-        td_nsbh, _ = np.histogram(log_td[bhns], weights=weights[bhns], bins=bins_td)
-        td_bns, _ = np.histogram(log_td[bns], weights=weights[bns], bins=bins_td)
-
-        hist_data = (m1_bbh, m1_nsbh, m1_bns, q_bbh, q_nsbh, q_bns, td_bbh, td_nsbh, td_bns)
-        return hist_data
 
     @staticmethod
     def _calculate_m1_m2_q(b: DataFrame) -> tuple:
