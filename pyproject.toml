@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=75.8", "numpy>=2.0", "pandas>=2.0", "astropy>=6.1.7", "scipy>=1.15.1", "tqdm", "h5py"]
+requires = ["setuptools>=75.8", "numpy>=2.0", "pandas>=2.0", "astropy>=6.1.7", "scipy>=1.15.1", "tqdm", "h5py", "xarray"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "MC_rates"
-version = "0.4"
+version = "0.5"
 authors = [
   { name="Duncan Maclean", email="dmaclean@unc.edu" },
 ]
