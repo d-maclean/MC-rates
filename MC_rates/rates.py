@@ -202,8 +202,7 @@ class MCRates:
             - `bbh`: BBHs (yr^-1 Gpc^-3)
             - `nsbh`: NSBHs (yr^-1 Gpc^-3)
             - `bns`: BNSe (yr^-1 Gpc^-3)
-            - `data`: DataFrame of rates calculations
-            - `verbose_data`: DataFrame of detailed rates info
+            - `data`: Dataset of detailed rates data, including rates for each binary
         
         '''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
@@ -212,7 +211,6 @@ class MCRates:
         Zlims: tuple | None = kwargs.get("Zlims", None)
         max_ns: float | None = kwargs.get("max_ns", None)
         optimistic_ce: bool = kwargs.get("optimistic_ce", True)
-        verbose: bool = kwargs.get("verbose", False)
         show_tqdm: bool = kwargs.get("tqdm", True)
 
         n: int = nbins
