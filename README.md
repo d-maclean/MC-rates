@@ -41,6 +41,16 @@ rates_obj = MCRates(t0, tf, path_to_models, sfh_method="truncnorm")
 rates = rates_obj.calc_merger_rates(z_local=0.1)
 ```
 
+4. Access the output object to obtain local merger rates and detaild data:
+
+```
+rates.total # total local CBC rate
+rates.bbh # local BBH rate
+rates.nsbh # local NSBH rate
+rates.bns # local BNS rate
+rates.data # xarray dataset containing rates for all systems at all time bins
+```
+
 #### Star Formation Histories:
 
 - [Madau & Fragos (2017)](https://arxiv.org/abs/1606.07887v2)
