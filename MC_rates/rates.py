@@ -260,16 +260,14 @@ class MCRates:
             fracSFR_at_bin_centers[j,:] = \
                 np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
 
-        '''   
-        data = dict( # edges of bins
-            t_i = time_bin_edges[:-1].to(u.Myr),
-            t_f = time_bin_edges[1:].to(u.Myr),
-            z_i = z_at_edges[:-1],
-            z_f = z_at_edges[1:],
-        )'''
-
         n_binaries_per_j = np.array([x.mergers.shape[0] for x in self.bins])
         total_n_binaries = np.sum(n_binaries_per_j)
+
+        try: # get channel data, if available
+            channel_data = [x.mergers.channel for x in self.bins]
+        except AttributeError:
+            channel_data = np.ones(total_n_binaries, dtype=int) * -1
+
         data = dict(
             # info on comoving time bins
             time_bins = np.arange(0, n),
@@ -285,6 +283,7 @@ class MCRates:
             m2 = np.concat([self._calculate_m1_m2_q(x.mergers)[1] for x in self.bins]),
             q = np.concat([self._calculate_m1_m2_q(x.mergers)[2] for x in self.bins]),
             t_delay = np.concat([x.mergers.t_delay for x in self.bins]),
+            channel = channel_data,
             rest_frame_rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
             rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
             # rates per time bin
@@ -419,6 +418,8 @@ class MCRates:
                 "m2": (["indices"], data["m2"]),
                 "q": (["indices"], data["q"]),
                 "t_delay": (["indices"], data["t_delay"]),
+                "channel": (["indices"], data["channel"]),
+                # rates for each binry in each time bin
                 "rates": (["indices", "comoving_time"], data["rates"]),
                 "rest_frame_rates": (["indices", "comoving_time"], data["rest_frame_rates"]),
                 # time bin info
