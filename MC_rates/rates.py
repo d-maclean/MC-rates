@@ -5,19 +5,43 @@ from glob import glob
 import numpy as np
 from astropy import units as u, constants as const
 from astropy.cosmology import Cosmology, Planck15, z_at_value
-from dataclasses import dataclass
 import pandas as pd
 from tqdm import tqdm
 from numpy.typing import NDArray
 from pandas import DataFrame, Series
 from astropy.units import Quantity
+import xarray as xr
 
 from typing import ClassVar, NamedTuple, Any
+from xarray import Dataset
 
 from rates_functions import process_cosmic_models
 from sfh_madau_fragos import madau_fragos_SFH
 from sfh_chruslinska_nelemans import chr_nel_SFH
 from sfh_illustris import illustris_TNG_SFH
+
+
+class RatesResult(NamedTuple):
+    '''
+    Nmaed tuple containing rates output. Local rates are reported in yr^-1 Gpc^-3.
+
+    ### Fields
+
+    `total`: the total local rate of CBCs
+
+    `bbh`: the local binary black hole rate
+
+    `nsbh`: the local neutron star/black hole rate
+
+    `bns`: the local binary neutron star rate
+
+    `data`: a Dataset of per-binary information for each metallicity and time bin
+    '''
+    total: Quantity
+    bbh: Quantity
+    nsbh: Quantity
+    bns: Quantity
+    data: Dataset
 
 SFH_METHODS = {
     "lognorm",
@@ -25,14 +49,6 @@ SFH_METHODS = {
     "illustris",
     "chruslinska19"
     }
-
-
-class RatesResult(NamedTuple):
-    total: Quantity
-    bbh: Quantity
-    nsbh: Quantity
-    bns: Quantity
-    data: DataFrame
 
 class Model:
 
@@ -114,7 +130,7 @@ class MCRates:
     def __init__(self, t0: Quantity, tf: Quantity, models: str | list[str], **kwargs):
 
         self.cosmology: Cosmology = kwargs.get("cosmology", Planck15)
-        self.Zsun: float = kwargs.get("Zsun", 0.017)
+        self.Zsun: float = kwargs.get("Zsun", 0.014)
         num_pts: int = kwargs.get("num_pts", 1000)
         self.sfh_method = kwargs.get("sfh_method", "truncnorm")
         if self.sfh_method not in SFH_METHODS:
@@ -151,11 +167,44 @@ class MCRates:
         cls.__init__(*args, **kwargs)
         return
 
-    # trying once again
     def calc_merger_rates(self,
                           nbins: int = 200, z_local: float = 0.1,
                           **kwargs) -> RatesResult:
-        '''Calculate dco merger rates per Dominik+2013.'''
+        '''
+        Calculate DCO merger rates per Dominik+2013.
+        
+        ### Parameters
+        `nbins`: the number of equally-spaced covmoving time bins to use. default=`200`
+
+        `z_local`: the cutoff for the 'local' universe, used to calculate cosmological rates. default=`0.1`
+
+        `primary_mass_lims`: cutoff limits for primary mass (Msun)
+
+        `secondary_mass_lims`: cutoff limits for sedcondary mass (Msun)
+
+        `q_lims`: cutoff limits for q (m2/m1)
+
+        `Zlims`: cutoff limits for metallicity (absolute)
+
+        `max_ns`: maximum mass for neutron stars. If not passed, BSE kstars are used instead.
+
+        `optimistic_ce`: whether to allow stars with non-differentiated core/enevelope boundary to survive
+        common envelope. default=`True`
+
+        `verbose`: whether to output individual rates for each monte-carlo data point
+
+        `show_tqdm`: show a progress bar. default=`True`.
+
+        ### Returns
+
+        `RatesResult`: a named tuple containing the following fields:
+            - `total`: sum of all CBCs (yr^-1 Gpc^-3)
+            - `bbh`: BBHs (yr^-1 Gpc^-3)
+            - `nsbh`: NSBHs (yr^-1 Gpc^-3)
+            - `bns`: BNSe (yr^-1 Gpc^-3)
+            - `data`: Dataset of detailed rates data, including rates for each binary
+        
+        '''
         primary_mass_lims: tuple | None = kwargs.get("primary_mass_lims", None)
         secondary_mass_lims: tuple | None = kwargs.get("secondary_mass_lims", None)
         q_lims: tuple | None = kwargs.get("q_lims", None)
@@ -163,6 +212,10 @@ class MCRates:
         max_ns: float | None = kwargs.get("max_ns", None)
         optimistic_ce: bool = kwargs.get("optimistic_ce", True)
         show_tqdm: bool = kwargs.get("tqdm", True)
+
+        n: int = nbins
+        n_j: int = self.bins.shape[0]
+        cosmo: Cosmology = self.cosmology
         
         mass_filter_pri: bool = False
         m_pri_min, m_pri_max = 0, 300
@@ -189,10 +242,6 @@ class MCRates:
             Z_filter = True
             Z_min: float = Zlims[0]
             Z_max: float = Zlims[1]
-        
-        n: int = nbins
-        n_j: int = self.bins.shape[0]
-        cosmo: Cosmology = self.cosmology
 
         t_i: Quantity = self.comoving_time[0]
         t_f: Quantity = self.comoving_time[-1]
@@ -210,25 +259,44 @@ class MCRates:
         for j in range(n_j):
             fracSFR_at_bin_centers[j,:] = \
                 np.interp(time_bin_centers, self.comoving_time, self.fractional_SFR_at_met[j,:])
-                
-        data: dict[str,NDArray] = {
-            "t_center": time_bin_centers.to(u.Myr),
-            "t_i": time_bin_edges[:-1].to(u.Myr),
-            "t_f": time_bin_edges[1:].to(u.Myr),
-            "z_center": z_at_centers,
-            "z_i": z_at_edges[:-1],
-            "z_f": z_at_edges[1:],
-            "E_z": E_z_at_centers,
-            "N_bbh": np.zeros(shape=n) * self.VOLRATE,
-            "N_bhns": np.zeros(shape=n) * self.VOLRATE,
-            "N_bns": np.zeros(shape=n) * self.VOLRATE,
-            "N_total": np.zeros(shape=n) * self.VOLRATE,
-            "R_bbh": np.zeros(shape=n) * self.RATE,
-            "R_bhns": np.zeros(shape=n) * self.RATE,
-            "R_bns": np.zeros(shape=n) * self.RATE,
-            "R_total": np.zeros(shape=n) * self.RATE,
-        }
-        
+
+        n_binaries_per_j = np.array([x.mergers.shape[0] for x in self.bins])
+        total_n_binaries = np.sum(n_binaries_per_j)
+
+        try: # get channel data, if available
+            channel_data = [x.mergers.channel for x in self.bins]
+        except AttributeError:
+            channel_data = np.ones(total_n_binaries, dtype=int) * -1
+
+        data = dict(
+            # info on comoving time bins
+            time_bins = np.arange(0, n),
+            t_center = time_bin_centers,
+            z_center = z_at_centers,
+            E_z = E_z_at_centers,
+            is_local = np.zeros(n, dtype=bool),
+            # info on binaries
+            indices = np.arange(total_n_binaries),
+            metallicity = np.repeat(self.metallicities, [x.mergers.shape[0] for x in self.bins]),
+            bin_nums = np.concat([x.mergers.bin_num.unique() for x in self.bins]),
+            m1 = np.concat([self._calculate_m1_m2_q(x.mergers)[0] for x in self.bins]),
+            m2 = np.concat([self._calculate_m1_m2_q(x.mergers)[1] for x in self.bins]),
+            q = np.concat([self._calculate_m1_m2_q(x.mergers)[2] for x in self.bins]),
+            t_delay = np.concat([x.mergers.t_delay for x in self.bins]),
+            channel = channel_data,
+            rest_frame_rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
+            rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
+            # rates per time bin
+            N_bbh = np.zeros(shape=n) * self.VOLRATE,
+            N_bhns = np.zeros(shape=n) * self.VOLRATE,
+            N_bns = np.zeros(shape=n) * self.VOLRATE,
+            N_total = np.zeros(shape=n) * self.VOLRATE,
+            R_bbh = np.zeros(shape=n) * self.RATE,
+            R_bhns = np.zeros(shape=n) * self.RATE,
+            R_bns = np.zeros(shape=n) * self.RATE,
+            R_total= np.zeros(shape=n) * self.RATE,
+        )
+
         for i, t_center in enumerate(
             tqdm(time_bin_centers, desc="Comoving time bins", unit="bins", disable=not show_tqdm)):
             
@@ -243,7 +311,7 @@ class MCRates:
             N_rest_bbh = 0.0 * self.VOLRATE
             N_rest_bhns = 0.0 * self.VOLRATE
             N_rest_bns = 0.0 * self.VOLRATE
-            
+
             for j, Zbin in enumerate(self.bins):
                 
                 if Z_filter:
@@ -257,6 +325,8 @@ class MCRates:
                 systems = Zbin.mergers
                 nk = systems.shape[0]
 
+                primary_mass, secondary_mass, q = self._calculate_m1_m2_q(systems)
+
                 t_delay_filter = np.ones(nk, dtype=bool)
                 mass_filter = t_delay_filter.copy()
                 ce_filter = t_delay_filter.copy()
@@ -265,18 +335,12 @@ class MCRates:
                 t_delay_filter = \
                     (Zbin.mergers.t_delay.values < \
                     (t_center.to(u.Myr).value - self.comoving_time[0].to(u.Myr).value))
-                #systems: pd.DataFrame = Zbin.mergers.loc[t_delay_filter]
 
                 if not optimistic_ce:
                     if "merge_in_ce" not in systems.columns:
                         print("Warning: Can't find `merge_in_ce` column in your data files. Proceeding with optimistic_ce.")
                     else:
                         ce_filter = ~systems.merge_in_ce
-                        #systems = systems.loc[~systems.merge_in_ce] # type: ignore
-                
-                component_masses = systems[["mass_1", "mass_2"]].to_numpy()
-                primary_mass: Series = component_masses.max(axis=1)
-                secondary_mass: Series = component_masses.min(axis=1)
                 if (mass_filter_pri or mass_filter_sec):
                     if (mass_filter_pri and mass_filter_sec):
                         mass_filter = (primary_mass >= m_pri_min) & (primary_mass < m_pri_max) &\
@@ -287,15 +351,14 @@ class MCRates:
                         mass_filter = (secondary_mass >= m_sec_min) & (secondary_mass < m_sec_max)
                     else:
                         raise ValueError()
-                    #systems = systems[mass_filter]
                 if do_q_filter:
                     q = (secondary_mass / primary_mass)
                     q_filter = (q >= q_min) & (q <= q_max)
-                    #systems = systems[q_filter]
                 
-                systems = systems[(t_delay_filter) & (mass_filter) & (q_filter) & (ce_filter)]
+                merging_filter = (t_delay_filter) & (mass_filter) & (q_filter) & (ce_filter)
+                merging_systems = systems[merging_filter]
+                t_form: NDArray = (t_center - merging_systems.t_delay.values * u.Myr).to(u.Myr)
 
-                t_form: NDArray = (t_center - systems.t_delay.values * u.Myr).to(u.Myr)
                 # get system type for each dco
                 if max_ns is None:
                     bbh, bhns, bns = self.dco_kstar_filter(systems)
@@ -311,36 +374,88 @@ class MCRates:
                     (binfrac * f_corr) * (frac_SFR_at_t_form / Msim)).to(self.VOLRATE)
                 
                 N_rest_total += Rates_intrinsic.sum()
-                N_rest_bbh += Rates_intrinsic[bbh].sum()
-                N_rest_bhns += Rates_intrinsic[bhns].sum()
-                N_rest_bns += Rates_intrinsic[bns].sum()
+                N_rest_bbh += Rates_intrinsic[bbh[merging_filter]].sum()
+                N_rest_bhns += Rates_intrinsic[bhns[merging_filter]].sum()
+                N_rest_bns += Rates_intrinsic[bns[merging_filter]].sum()
                 
+                rate_per_system = np.zeros(nk) * self.VOLRATE
+                rate_per_system[merging_filter] = Rates_intrinsic
+                data["rest_frame_rates"][j][:,i] = rate_per_system
+
             # prepare rates integral
-            def rate_integral(n_rest: Quantity) -> Quantity:
+            def cosmological_rate_integral() -> Quantity:
                 '''Integrate the rest-frame event rates to obtain a local, observable rate.'''
                 dV_z = 4 * np.pi * (const.c / cosmo.H(z_center)) *\
                     np.float_power(cosmo.comoving_distance(z_center), 2)
-                return (n_rest * dV_z * (dz/(1 + z_center))).to(u.yr ** -1)
+                return (dV_z * (dz/(1 + z_center))).to(u.Gpc ** 3)
+            rate_integral = cosmological_rate_integral()
             
             data["N_total"][i] = N_rest_total
             data["N_bbh"][i] = N_rest_bbh
             data["N_bhns"][i] = N_rest_bhns
             data["N_bns"][i] = N_rest_bns
-            data["R_total"][i] = rate_integral(N_rest_total)
-            data["R_bbh"][i] = rate_integral(N_rest_bbh)
-            data["R_bhns"][i] = rate_integral(N_rest_bhns)
-            data["R_bns"][i] = rate_integral(N_rest_bns)
-        
-        output_df: pd.DataFrame = pd.DataFrame(data)
-    
-        local_universe: pd.Series[bool] = output_df.z_center < z_local
-        R_tot = output_df.R_total.loc[local_universe].sum() / u.yr #* z_local
-        R_bbh = output_df.R_bbh.loc[local_universe].sum() / u.yr #* z_local
-        R_bhns = output_df.R_bhns.loc[local_universe].sum() / u.yr #* z_local
-        R_bns = output_df.R_bns.loc[local_universe].sum() / u.yr #* z_local
+            data["R_total"][i] = rate_integral * N_rest_total
+            data["R_bbh"][i] = rate_integral * N_rest_bbh
+            data["R_bhns"][i] = rate_integral * N_rest_bhns
+            data["R_bns"][i] = rate_integral * N_rest_bns
 
-        return RatesResult(R_tot, R_bbh, R_bhns, R_bns, output_df)
-    
+            for j in range(n_j):
+                data["rates"][j][:,i] = \
+                    data["rest_frame_rates"][j][:,i] * rate_integral
+
+        #output_df: pd.DataFrame = pd.DataFrame(data)
+        local_universe = z_at_centers < z_local
+        local_volume = cosmo.comoving_volume(z_local).to(u.Gpc**3)        
+
+        data["rest_frame_rates"] = np.concat(data["rest_frame_rates"], axis=0)
+        data["rates"] = np.concat(data["rates"], axis=0)
+
+        dataset = xr.Dataset(
+            data_vars = {
+                "metallicity": (["indices"], data["metallicity"]),
+                "bin_num": (["indices"], data["bin_nums"]),
+                "m1": (["indices"], data["m1"]),
+                "m2": (["indices"], data["m2"]),
+                "q": (["indices"], data["q"]),
+                "t_delay": (["indices"], data["t_delay"]),
+                "channel": (["indices"], data["channel"]),
+                # rates for each binry in each time bin
+                "rates": (["indices", "comoving_time"], data["rates"]),
+                "rest_frame_rates": (["indices", "comoving_time"], data["rest_frame_rates"]),
+                # time bin info
+                "is_local": (["comoving_time"], local_universe),
+                "E_z": (["comoving_time"], data["E_z"]),
+                "N_bbh": (["comoving_time"], data["N_bbh"]),
+                "N_bhns": (["comoving_time"], data["N_bhns"]),
+                "N_bns": (["comoving_time"], data["N_bns"]),
+                "N_total": (["comoving_time"], data["N_total"]),
+                "R_bbh": (["comoving_time"], data["R_bbh"]),
+                "R_bhns": (["comoving_time"], data["R_bhns"]),
+                "R_bns": (["comoving_time"], data["R_bns"]),
+                "R_total": (["comoving_time"], data["R_total"]),
+            },
+            coords = {
+                "indices": (["indices"], data["indices"]),
+                "comoving_time": (["comoving_time"], data["time_bins"]),
+                "redshift": (["comoving_time"], z_at_centers)
+            },
+        )
+
+        R_tot = dataset.R_total[local_universe].sum().data / local_volume
+        R_bbh = dataset.R_bbh[local_universe].sum().data / local_volume
+        R_bhns = dataset.R_bhns[local_universe].sum().data / local_volume
+        R_bns = dataset.R_bns[local_universe].sum().data / local_volume
+
+        return RatesResult(R_tot, R_bbh, R_bhns, R_bns, dataset)
+
+
+    @staticmethod
+    def _calculate_m1_m2_q(b: DataFrame) -> tuple:
+        component_masses = b[["mass_1", "mass_2"]].to_numpy()
+        primary_mass = component_masses.max(axis=1)
+        secondary_mass = component_masses.min(axis=1)
+        return primary_mass, secondary_mass, secondary_mass / primary_mass
+
     @staticmethod
     def _get_bins_from_time(t: NDArray | Quantity, time_bins: NDArray) -> NDArray | Quantity:
         '''Return the index of the closest calculated time point from time values.'''
