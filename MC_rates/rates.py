@@ -264,7 +264,7 @@ class MCRates:
         total_n_binaries = np.sum(n_binaries_per_j)
 
         try: # get channel data, if available
-            channel_data = [x.mergers.channel for x in self.bins]
+            channel_data = np.concat([x.mergers.channel for x in self.bins])
         except AttributeError:
             channel_data = np.ones(total_n_binaries, dtype=int) * -1
 
