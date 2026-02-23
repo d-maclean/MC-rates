@@ -3,6 +3,7 @@ from astropy import units as u
 import pandas as pd
 from scipy.integrate import quad
 
+from pandas import HDFStore, DataFrame
 from numpy.typing import NDArray
 
 
@@ -13,39 +14,54 @@ def trivial_Pdet(data: dict) -> NDArray:
 
 
 # filter pipeline for unwinnowed COSMIC output
-def process_cosmic_models(bpp: pd.DataFrame) -> pd.DataFrame:
+def process_cosmic_models(store, HDFStore) -> tuple[NDArray, DataFrame, DataFrame]:
     '''
     Winnow a COSMIC output file down to BHNS systems.
     '''
     ecc_range, ecc_integral = calculate_ecc_integral(1000)
+
+    bpp = store.get("bpp")
+    bcm = store.get("bcm")
     
-    bhns = get_cbc_systems(bpp)
-    t_gw_sec = calculate_gw_timescale(bhns, ecc_range, ecc_integral)
+    cbc_bins, cbc_form_rows, bpp = get_cbc_systems(bpp, bcm)
+    t_gw_sec = calculate_gw_timescale(cbc_form_rows, ecc_range, ecc_integral)
     t_gw = (t_gw_sec * u.s).to(u.Myr) #type: ignore
     
-    t_delay = bhns.tphys + t_gw.value
+    t_delay = cbc_form_rows.tphys + t_gw.value
     data = {"t_gw": t_gw.value, "t_delay": t_delay}
-    bhns.assign(**data)
+    cbc_form_rows.assign(**data)
     
-    return bhns.copy()
+    return cbc_bins, cbc_form_rows.copy(), bpp
 
 
 # filter down to BHNS systems
-def get_cbc_systems(bpp: pd.DataFrame) -> pd.DataFrame:
+def get_cbc_systems(bpp: DataFrame, bcm: DataFrame) -> tuple[NDArray, DataFrame, DataFrame]:
      '''
-     Provides a df containing only the following bins:
-     - at at least one time, both objects are either a BH or NS
-     - the orbital separation is > 0 (non-disrupted)
-     - the evol_type is 2 (kstar just changed)
+     Obtain CBC system bins by merger type.
      '''
-     bhns = bpp[
-               ((bpp.kstar_1 == 13) | (bpp.kstar_1 == 14))\
-                    & ((bpp.kstar_2 == 13) | (bpp.kstar_2 == 14))\
-                    & (bpp.sep > 0e0)\
-                    & (bpp.evol_type == 2)
-               ]
+     kstars = [13,14]
+     merger_types = ["1313", "1413", "1314", "1414"]
+
+     cbc_form_rows = bpp.loc[(bpp['kstar_1'].isin(kstars)) & (bpp['kstar_2'].isin(kstars)) & (bpp['sep'] > 0)].groupby('bin_num', as_index=False).first()
+     _bins = cbc_form_rows.bin_num.unique()
+     cbc_disrupting_later = bpp.loc[bpp.bin_num.isin(_bins) & (bpp.sep == -1)].bin_num.unique()
+     cbc_form_rows = cbc_form_rows.loc[~cbc_form_rows.bin_num.isin(cbc_disrupting_later)]
+     bins = cbc_form_rows.bin_num.unique()
+
+     cbc_bpp = bpp.loc[bpp.bin_num.isin(bins)]
+
+     bc_merge_bins = bcm.loc[bcm.merger_type.isin(merger_types)].bin_num.unique()
+     bc_wide_bins = bcm.loc[(bcm.bin_state==0) & (bcm.kstar_1.isin(kstars)) & (bcm.kstar_2.isin(kstars))].bin_num.unique()
+
+     n1 = bc_merge_bins[~np.isin(bc_merge_bins, bins)]
+     n2 = bc_wide_bins[~np.isin(bc_wide_bins, bins)]
+
+     if len(n1) > 0:
+          print(f"WARNING: merging bin numbers {n1} not found in formation filter.")
+     if len(n2) > 0:
+          print(f"WARNING: wide bin numbers {n2} not found in formation filter.")
      
-     return bhns
+     return bins, cbc_form_rows, cbc_bpp
 
 
 # functions for postprocessing COSMIC data & calculate GW timescale

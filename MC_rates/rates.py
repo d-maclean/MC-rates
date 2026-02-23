@@ -59,7 +59,6 @@ class Model:
         if not os.path.isfile(filepath):
             raise FileNotFoundError(f"{filepath} not found!")
                         
-
         self.f_corr = kwargs.get("f_corr", 1.0)
         if filepath in self.cache:
             _data = self.cache[filepath]
@@ -73,8 +72,10 @@ class Model:
             self.metallicity: float = self.initCond.metallicity.values[0]
             if "/mergers" in store.keys():
                 self.mergers = store.get("mergers")
+                self.bpp = None
             else:
-                self.mergers = process_cosmic_models(store.get("bpp")) #type: ignore
+                bins, self.mergers, self.bpp = process_cosmic_models(store) #type: ignore
+                self.initCond = self.initCond.loc[bins]
             
             self.n_singles: int = store.get("n_singles").values.max()
             self.n_binaries: int = store.get("n_binaries").values.max()
@@ -90,6 +91,7 @@ class Model:
             "metallicity": self.metallicity,
             "initCond": self.initCond,
             "mergers": self.mergers,
+            "bpp": self.bpp,
             "n_singles": self.n_binaries,
             "n_binaries": self.n_binaries,
             "binfrac_model": self.binfrac_model,
