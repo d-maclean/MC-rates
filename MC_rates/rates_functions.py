@@ -50,6 +50,10 @@ def get_cbc_systems(bpp: DataFrame, bcm: DataFrame) -> tuple[NDArray, DataFrame,
 
      cbc_bpp = bpp.loc[bpp.bin_num.isin(bins)]
 
+     # get mergers in pessimistic CE (where MS/HG donors always merge)
+     merge_in_ce = get_mergers_in_pessimistic_ce(bpp.loc[bpp.bin_num.isin(_bins)])
+     cbc_form_rows = cbc_form_rows.assign(merge_in_ce=merge_in_ce)
+
      bc_merge_bins = bcm.loc[bcm.merger_type.isin(merger_types)].bin_num.unique()
      bc_wide_bins = bcm.loc[(bcm.bin_state==0) & (bcm.kstar_1.isin(kstars)) & (bcm.kstar_2.isin(kstars))].bin_num.unique()
 
@@ -116,3 +120,23 @@ def calculate_gw_timescale(df: pd.DataFrame,
           * np.interp(e0, ecc_range, ecc_int)
 
      return t_gw
+
+def get_mergers_in_pessimistic_ce(bpp: pd.DataFrame) -> NDArray:
+     '''
+     Providees an arrray of bin numbers (unique systems) which
+     would merge in CE assuming a pessimistic common envelope
+     scenario. This treats systems which would have merged with
+     `cemergeflag = 1` in COSMIC.
+     
+     Code adapted from Michael Zevin's rates code.
+     '''
+     kstars: list = [0,1,2,7,8,10,11,12] # from BSE/comenv.f
+
+     CE1 = bpp.loc[(bpp.RRLO_1>bpp.RRLO_2) & (bpp.evol_type == 7)]
+     CE2 = bpp.loc[(bpp.RRLO_2>bpp.RRLO_1) & (bpp.evol_type == 7)]
+
+     CE1_merg = CE1.loc[CE1.kstar_1.isin(kstars)].bin_num
+     CE2_merg = CE2.loc[CE2.kstar_2.isin(kstars)].bin_num
+     
+     ce_merge_bins = pd.concat([CE1_merg, CE2_merg]).unique()
+     return ce_merge_bins
