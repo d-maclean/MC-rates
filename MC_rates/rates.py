@@ -268,6 +268,11 @@ class MCRates:
         except AttributeError:
             channel_data = np.ones(total_n_binaries, dtype=int) * -1
 
+        get_mass_ratio_reversal = lambda mergers: (mergers.mass_1<mergers.mass_2)
+        mass_ratio_reversal_data = np.concat([get_mass_ratio_reversal(x.mergers) for x in self.bins])
+        _m1_init = np.concat([x.initCond.mass_1 for x in self.bins])
+        _m2_init = np.concat([x.initCond.mass_2 for x in self.bins])
+
         data = dict(
             # info on comoving time bins
             time_bins = np.arange(0, n),
@@ -284,9 +289,15 @@ class MCRates:
             q = np.concat([self._calculate_m1_m2_q(x.mergers)[2] for x in self.bins]),
             t_delay = np.concat([x.mergers.t_delay for x in self.bins]),
             channel = channel_data,
+            # initial conditions
+            m1_i = np.where(mass_ratio_reversal_data, _m2_init, _m1_init),
+            m2_i = np.where(mass_ratio_reversal_data, _m1_init, _m2_init),
+            porb_i = np.concat([x.initCond.porb for x in self.bins]),
+            ecc_i = np.concat([x.initCond.ecc for x in self.bins]),
+            # rates per binary per time bin
             rest_frame_rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
             rates = [np.zeros((nk, n)) for nk in n_binaries_per_j],
-            # rates per time bin
+            # total rates per time bin
             N_bbh = np.zeros(shape=n) * self.VOLRATE,
             N_bhns = np.zeros(shape=n) * self.VOLRATE,
             N_bns = np.zeros(shape=n) * self.VOLRATE,
@@ -412,6 +423,7 @@ class MCRates:
 
         dataset = xr.Dataset(
             data_vars = {
+                # binary info
                 "metallicity": (["indices"], data["metallicity"]),
                 "bin_num": (["indices"], data["bin_nums"]),
                 "m1": (["indices"], data["m1"]),
@@ -419,6 +431,11 @@ class MCRates:
                 "q": (["indices"], data["q"]),
                 "t_delay": (["indices"], data["t_delay"]),
                 "channel": (["indices"], data["channel"]),
+                # info on initial conditions
+                "m1_i": (["indices"], data["m1_i"]),
+                "m2_i": (["indices"], data["m2_i"]),
+                "porb_i": (["indices"], data["porb_i"]),
+                "ecc_i": (["indices"], data["ecc_i"]),
                 # rates for each binry in each time bin
                 "rates": (["indices", "comoving_time"], data["rates"]),
                 "rest_frame_rates": (["indices", "comoving_time"], data["rest_frame_rates"]),
