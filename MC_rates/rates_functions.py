@@ -14,7 +14,7 @@ def trivial_Pdet(data: dict) -> NDArray:
 
 
 # filter pipeline for unwinnowed COSMIC output
-def process_cosmic_models(store, HDFStore) -> tuple[NDArray, DataFrame, DataFrame]:
+def process_cosmic_models(store: HDFStore) -> tuple[NDArray, DataFrame, DataFrame]:
     '''
     Winnow a COSMIC output file down to BHNS systems.
     '''
