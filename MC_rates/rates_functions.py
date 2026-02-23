@@ -25,7 +25,7 @@ def process_cosmic_models(store, HDFStore) -> tuple[NDArray, DataFrame, DataFram
     
     cbc_bins, cbc_form_rows, bpp = get_cbc_systems(bpp, bcm)
     t_gw_sec = calculate_gw_timescale(cbc_form_rows, ecc_range, ecc_integral)
-    t_gw = (t_gw_sec * u.s).to(u.Myr) #type: ignore
+    t_gw = (t_gw_sec.values * u.s).to(u.Myr) #type: ignore
     
     t_delay = cbc_form_rows.tphys + t_gw.value
     data = {"t_gw": t_gw.value, "t_delay": t_delay}
