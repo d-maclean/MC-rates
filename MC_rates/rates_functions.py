@@ -51,7 +51,7 @@ def get_cbc_systems(bpp: DataFrame, bcm: DataFrame) -> tuple[NDArray, DataFrame,
      cbc_bpp = bpp.loc[bpp.bin_num.isin(bins)]
 
      # get mergers in pessimistic CE (where MS/HG donors always merge)
-     merge_in_ce = get_mergers_in_pessimistic_ce(bpp.loc[bpp.bin_num.isin(_bins)])
+     merge_in_ce = get_mergers_in_pessimistic_ce(bpp.loc[bpp.bin_num.isin(bins)])
      cbc_form_rows = cbc_form_rows.assign(merge_in_ce=merge_in_ce)
 
      bc_merge_bins = bcm.loc[bcm.merger_type.isin(merger_types)].bin_num.unique()
