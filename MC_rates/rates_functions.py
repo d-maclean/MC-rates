@@ -29,7 +29,7 @@ def process_cosmic_models(store: HDFStore) -> tuple[NDArray, DataFrame, DataFram
     
     t_delay = cbc_form_rows.tphys + t_gw.value
     data = {"t_gw": t_gw.value, "t_delay": t_delay}
-    cbc_form_rows.assign(**data)
+    cbc_form_rows = cbc_form_rows.assign(**data)
     
     return cbc_bins, cbc_form_rows.copy(), bpp
 
