@@ -74,8 +74,7 @@ class Model:
                 self.mergers = store.get("mergers")
                 self.bpp = None
             else:
-                bins, self.mergers, self.bpp = process_cosmic_models(store) #type: ignore
-                self.initCond = self.initCond.loc[bins]
+                self.initCond, self.mergers, self.bpp = process_cosmic_models(store) #type: ignore
             
             self.n_singles: int = store.get("n_singles").values.max()
             self.n_binaries: int = store.get("n_binaries").values.max()

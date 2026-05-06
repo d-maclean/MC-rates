@@ -14,24 +14,47 @@ def trivial_Pdet(data: dict) -> NDArray:
 
 
 # filter pipeline for unwinnowed COSMIC output
-def process_cosmic_models(store: HDFStore) -> tuple[NDArray, DataFrame, DataFrame]:
-    '''
-    Winnow a COSMIC output file down to BHNS systems.
-    '''
-    ecc_range, ecc_integral = calculate_ecc_integral(1000)
+def process_cosmic_models(store: HDFStore) -> tuple[DataFrame, DataFrame, DataFrame]:
+     '''
+     Winnow a COSMIC output file down to compact binary systems that don't disrupt.
+     '''
+     ecc_range, ecc_integral = calculate_ecc_integral(1000)
 
-    bpp = store.get("bpp")
-    bcm = store.get("bcm")
-    
-    cbc_bins, cbc_form_rows, bpp = get_cbc_systems(bpp, bcm)
-    t_gw_sec = calculate_gw_timescale(cbc_form_rows, ecc_range, ecc_integral)
-    t_gw = (t_gw_sec.values * u.s).to(u.Myr) #type: ignore
-    
-    t_delay = cbc_form_rows.tphys + t_gw.value
-    data = {"t_gw": t_gw.value, "t_delay": t_delay}
-    cbc_form_rows = cbc_form_rows.assign(**data)
-    
-    return cbc_bins, cbc_form_rows.copy(), bpp
+     bpp = store.get("bpp")
+     bcm = store.get("bcm")
+     initC = store.get("initCond")
+
+     # detect mergers in common envelope phase
+     ce_merger_idx = get_mergers_in_pessimistic_ce(bpp) # type: ignore
+     print(f"Found {len(ce_merger_idx)} systems merging in CE...")
+     bpp = bpp.assign(merge_in_ce = False)
+     bpp.loc[bpp.bin_num.isin(ce_merger_idx), "merge_in_ce"] = True
+
+     # filter binaries down to non-disrupted CBCs
+     print("Filtering for CBCs...")
+     cbc_idx, cbc_form_rows, cbc_bpp,  = get_cbc_systems(bpp, bcm) # type: ignore
+     del bpp, bcm
+     print(f"Found {len(cbc_idx)} BHNS systems.")
+     
+     # trying our best
+     cbc_initC: DataFrame = initC.loc[cbc_idx].copy() # type: ignore
+     del initC
+
+     # get t_gw from Peters Formula
+     print("Calculating gw timescales...")
+     t_gw = calculate_gw_timescale(cbc_form_rows, ecc_range, ecc_integral)
+     t_gw_Myr = t_gw * (3.1688e-14) # s to Myr
+
+     # add t_gw to system age to get total delay time
+     system_delay_time = cbc_form_rows.tphys + t_gw_Myr
+
+     # collect data for saving
+     cbc_form_rows = cbc_form_rows.assign(
+          t_gw=t_gw_Myr.values,
+          t_delay=system_delay_time.values,
+     )
+
+     return cbc_initC, cbc_form_rows, cbc_bpp
 
 
 # filter down to BHNS systems
@@ -67,7 +90,7 @@ def get_cbc_systems(bpp: DataFrame, bcm: DataFrame) -> tuple[NDArray, DataFrame,
      if len(n2) > 0:
           print(f"WARNING: wide bin numbers {n2} not found in formation filter.")
      
-     return bins, cbc_form_rows, cbc_bpp
+     return bins.copy(), cbc_form_rows.copy(), cbc_bpp.copy()
 
 
 # functions for postprocessing COSMIC data & calculate GW timescale
