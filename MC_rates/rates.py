@@ -138,6 +138,7 @@ class MCRates:
         if self.sfh_method not in SFH_METHODS:
             raise ValueError(f"Please supply a valid metallicity dispersion method. Valid options are: {[x for x in SFH_METHODS]}")
         logZ_sigma_for_SFH: float = kwargs.get("logZ_sigma", 0.5)
+        sfh_scale: float = kwargs.get("sfh_scale", 1.0)
         chruslinska_option: str = kwargs.get("chruslinska_option", "moderate")
         f_corr: float = kwargs.get("f_corr", 1.0)
 
@@ -156,10 +157,10 @@ class MCRates:
         elif self.sfh_method == "chruslinska19":
             sfh = chr_nel_SFH(self.comoving_time, self.redshift, self.metallicities, option=chruslinska_option, Zsun=self.Zsun)
         else:
-            raise ValueError("Couldn't find your SFH method!")
-        self.SFR_at_z = sfh["SFR_at_z"]
+            raise ValueError("Couldn't find your SFH method!\nAvailable options include ", SFH_METHODS)
+        self.SFR_at_z = sfh["SFR_at_z"] * sfh_scale
         self.mean_metallicity_at_z = sfh["mean_metallicity"]
-        self.fractional_SFR_at_met = sfh["fractional_SFR"]
+        self.fractional_SFR_at_met = sfh["fractional_SFR"] * sfh_scale
 
         return
 
