@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Maclean
+    given-names: Duncan
+    orcid: https://orcid.org/0009-0000-8189-9887
+title: "MC-rates"
+version: 0.5.1
+date-released: 2026-06-22
